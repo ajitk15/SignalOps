@@ -79,6 +79,7 @@ class Watchlist:
     max_consecutive_failures_before_backoff: int
     backoff_multiplier: int
     max_backoff_seconds: int
+    dashboard_title: str = "Incident Triage Pipeline"
 
 
 @dataclass
@@ -118,6 +119,7 @@ def load_watchlist() -> Watchlist:
         max_consecutive_failures_before_backoff=raw.get("max_consecutive_failures_before_backoff", 3),
         backoff_multiplier=raw.get("backoff_multiplier", 2),
         max_backoff_seconds=raw.get("max_backoff_seconds", 600),
+        dashboard_title=raw.get("dashboard_title", "Incident Triage Pipeline"),
     )
 
 
