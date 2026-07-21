@@ -87,10 +87,14 @@ async def api_get_incident(incident_id: int) -> dict:
 
 
 class ObservationRequest(BaseModel):
-    source: str = Field(pattern="^(mq_mcp|ace_mcp|splunk|dynatrace)$")
-    object_type: str
-    object_name: str
-    metric: str
+    # Open contract: any collector or webhook may post, constrained by charset
+    # and length rather than a closed source list. object_name must accept the
+    # names this system itself produces (e.g. MQNODE1/QL.INPUT) — uppercase,
+    # dots and slashes included. Defence in depth behind the output escaping.
+    source: str = Field(pattern=r"^[a-z0-9_.\-]{1,64}$")
+    object_type: str = Field(pattern=r"^[A-Za-z0-9_.\-]{1,64}$")
+    object_name: str = Field(pattern=r"^[A-Za-z0-9_.:/\-]{1,128}$")
+    metric: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
     value: str | float | int
     labels: dict[str, str] = Field(default_factory=dict)
     threshold: float | None = None

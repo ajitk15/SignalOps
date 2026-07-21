@@ -1,0 +1,32 @@
+# Platform profiles: everything the AI agents and report templates need to
+# know about a monitored platform. A source's `platform:` key in
+# watchlist.yaml selects its profile; unknown platforms fall back to generic.
+#
+# MCP credentials are env-var NAMES, never values.
+
+platforms:
+  ibm_mq:
+    display_name: IBM MQ / ACE
+    domain: IBM MQ and ACE middleware
+    escalation_team: InfraSupport / MQACE_ADMIN
+    next_step: Investigate related MQ/ACE service.
+    knowledge_file: knowledge/mq_failure_patterns.md
+    mcp_server:
+      name: ibm-mq
+      url_env: MQ_MCP_URL
+      user_env: MQ_MCP_AUTH_USER
+      password_env: MQ_MCP_AUTH_PASSWORD
+      tls_cert_env: MQ_MCP_TLS_CERT
+    investigation_tools:
+      - mcp__ibm-mq__mq_host_overview
+      - mcp__ibm-mq__mq_connection_verify
+      - mcp__ibm-mq__ace_search
+
+  generic:
+    display_name: Infrastructure
+    domain: infrastructure and application services
+    escalation_team: InfraSupport
+    next_step: Investigate the related service.
+    knowledge_file: null
+    mcp_server: null
+    investigation_tools: []
