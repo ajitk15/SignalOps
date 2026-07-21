@@ -67,10 +67,19 @@ def _subprocess_env() -> dict[str, str] | None:
 
 
 @dataclass
+class SourceConfig:
+    """One monitored source: a collector kind plus its targets."""
+    name: str
+    kind: str
+    platform: str = "ibm_mq"
+    options: dict = field(default_factory=dict)
+    targets: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class Watchlist:
     poll_interval_seconds: int
-    queues: list[dict]
-    channels: list[dict]
+    sources: list[SourceConfig]
     max_consecutive_failures_before_backoff: int
     backoff_multiplier: int
     max_backoff_seconds: int
@@ -82,12 +91,34 @@ class AgentModels:
     report_writer: str
 
 
+def _legacy_sources(raw: dict) -> list[SourceConfig]:
+    """Translate the pre-source `queues:`/`channels:` watchlist shape.
+
+    Kept so an existing config file keeps working mid-migration. The source is
+    named mq_mcp so Observation.source (and everything keyed on it) is
+    unchanged for legacy configs.
+    """
+    targets = [{"object_type": "queue", "name": q["name"], "metric": "queue_depth",
+                "threshold": q.get("depth_threshold"),
+                "labels": {k: q[k] for k in ("service", "environment", "role", "qmgr") if k in q}}
+               for q in raw.get("queues", [])]
+    targets += [{"object_type": "channel", "name": c["name"], "metric": "channel_status",
+                 "labels": {k: c[k] for k in ("service", "environment", "qmgr") if k in c}}
+                for c in raw.get("channels", [])]
+    return [SourceConfig(name="mq_mcp", kind="mq_mcp", targets=targets)] if targets else []
+
+
 def load_watchlist() -> Watchlist:
     raw = yaml.safe_load((CONFIG_DIR / "watchlist.yaml").read_text())
+    if "sources" in raw:
+        sources = [SourceConfig(name=s["name"], kind=s["kind"], platform=s.get("platform", "ibm_mq"),
+                                options=s.get("options", {}), targets=s.get("targets", []))
+                   for s in raw["sources"]]
+    else:
+        sources = _legacy_sources(raw)
     return Watchlist(
         poll_interval_seconds=raw["poll_interval_seconds"],
-        queues=raw.get("queues", []),
-        channels=raw.get("channels", []),
+        sources=sources,
         max_consecutive_failures_before_backoff=raw.get("max_consecutive_failures_before_backoff", 3),
         backoff_multiplier=raw.get("backoff_multiplier", 2),
         max_backoff_seconds=raw.get("max_backoff_seconds", 600),
