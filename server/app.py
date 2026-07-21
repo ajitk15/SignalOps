@@ -18,18 +18,17 @@ if sys.platform == "win32":
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import store  # noqa: E402
-from events import bus  # noqa: E402
+from events import Event, bus  # noqa: E402
 from enterprise_pipeline import EnterprisePipeline  # noqa: E402
 from detection import Observation  # noqa: E402
 from knowledge.service import draft_from_incident, search as search_kb  # noqa: E402
-from collect_mq_ace import collect_forever  # noqa: E402
+from collect_mq_ace import collect_forever, collector_health  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -39,11 +38,21 @@ enterprise_pipeline = EnterprisePipeline(
 _enterprise_collect_task: asyncio.Task | None = None
 
 
+def _log_collector_exit(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    logging.getLogger("collector").error(
+        "collection task exited unexpectedly — polling has stopped", exc_info=task.exception())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _enterprise_collect_task
     if os.getenv("ENABLE_MQ_ACE_COLLECTOR", "false").lower() == "true":
         _enterprise_collect_task = asyncio.create_task(collect_forever(enterprise_pipeline))
+        # collect_forever is meant to be immortal; if it ever returns or raises,
+        # say so rather than letting polling stop with nothing in the log.
+        _enterprise_collect_task.add_done_callback(_log_collector_exit)
     yield
     if _enterprise_collect_task:
         _enterprise_collect_task.cancel()
@@ -52,12 +61,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
-app.mount("/static", StaticFiles(directory=DASHBOARD_DIR), name="static")
 
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(DASHBOARD_DIR / "index.html")
+    # "no-cache" means revalidate on every load, not "don't store". Without it
+    # browsers apply heuristic freshness and keep running a stale copy of the
+    # dashboard for minutes after it changes. FileResponse sets an ETag but does
+    # not answer conditional requests, so each load re-sends the body — fine at
+    # this size, and correctness beats saving 36KB.
+    return FileResponse(DASHBOARD_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/incidents")
@@ -180,6 +193,14 @@ async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
     queue = bus.subscribe()
     try:
+        # Current state goes out on this same ordered channel, ahead of the
+        # history replay, so a client can never race a parallel fetch against
+        # the live events that supersede it. Constructed, not published — a
+        # published snapshot would land in every other client's history.
+        await websocket.send_json(Event("state_snapshot", {
+            "watched_objects": enterprise_pipeline.watched_objects(),
+            "collector": collector_health(),
+        }).to_dict())
         for event in bus.recent(50):
             await websocket.send_json(event.to_dict())
         while True:

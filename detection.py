@@ -80,6 +80,7 @@ class Correlator:
     def is_new(self, finding: Finding, now: float | None = None) -> bool:
         now = now or time.time()
         previous = self._last_seen.get(finding.fingerprint)
-        self._last_seen[finding.fingerprint] = now
-        return previous is None or now - previous >= self.dedup_window_seconds
-
+        if previous is None or now - previous >= self.dedup_window_seconds:
+            self._last_seen[finding.fingerprint] = now
+            return True
+        return False

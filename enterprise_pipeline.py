@@ -4,7 +4,7 @@ Signals enter as observations. Rules, correlation and KB lookup cost no LLM
 tokens. AI is invoked only for a new incident without a strong KB match.
 """
 from __future__ import annotations
-import asyncio, json, logging, os
+import asyncio, json, logging, os, time
 from pathlib import Path
 import yaml
 from dataclasses import asdict
@@ -33,10 +33,19 @@ class EnterprisePipeline:
         self.kb_search_threshold = knowledge_cfg["similarity_threshold"]
         self.kb_reuse_threshold = knowledge_cfg["zero_ai_reuse_threshold"]
         self.models = load_agent_models()
+        # Last reading per watched object, so a dashboard loading mid-cycle can
+        # render current state instead of waiting for the next poll's event.
+        self.latest_observations: dict[str, dict] = {}
+
+    def watched_objects(self) -> list[dict]:
+        return list(self.latest_observations.values())
 
     async def ingest(self, observation: Observation) -> dict:
         finding = self.rules.evaluate(observation)
         bus.publish(Event("observation_received", {"observation": asdict(observation), "finding": asdict(finding) if finding else None}))
+        self.latest_observations[observation.object_name] = {
+            "object_name": observation.object_name, "object_type": observation.object_type,
+            "status": "anomaly" if finding else "ok", "timestamp": observation.timestamp}
         if not finding: return {"outcome": "healthy", "ai_calls": 0}
         if not self.correlator.is_new(finding): return {"outcome": "deduplicated", "fingerprint": finding.fingerprint, "ai_calls": 0}
 
@@ -107,9 +116,21 @@ class EnterprisePipeline:
 
     def _save(self, finding, diagnosis, report, cost, context, route):
         snapshot = asdict(finding.observation) | {"reason": finding.reason, "fingerprint": finding.fingerprint, "context": context}
+        severity = report.get("severity", finding.severity)
+        title = report.get("title", finding.reason)
+        created_at = time.time()
         incident_id = store.save_incident(object_name=finding.observation.object_name, object_type=finding.observation.object_type,
-            severity=report.get("severity", finding.severity), title=report.get("title", finding.reason),
+            severity=severity, title=title,
             markdown_report=report.get("markdown_report", ""), watcher_json=snapshot, diagnosis_json=diagnosis,
-            report_json=report | {"route": route}, total_cost_usd=cost, trigger_source=finding.observation.source)
-        bus.publish(Event("incident_created", {"incident_id": incident_id, "title": report.get("title"), "route": route, "total_cost_usd": cost}))
+            report_json=report | {"route": route}, total_cost_usd=cost, trigger_source=finding.observation.source,
+            created_at=created_at)
+        # The dashboard renders this row directly, so it must carry everything
+        # /api/incidents would return — otherwise a live row shows a blank
+        # severity until a reload replaces it with the stored version.
+        bus.publish(Event("incident_created", {"incident_id": incident_id, "title": title, "route": route,
+                                               "total_cost_usd": cost, "severity": severity,
+                                               "object_name": finding.observation.object_name,
+                                               "object_type": finding.observation.object_type,
+                                               "trigger_source": finding.observation.source,
+                                               "created_at": created_at}))
         return incident_id
