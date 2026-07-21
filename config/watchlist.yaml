@@ -35,3 +35,15 @@ sources:
     # channels: SYSTEM.DEF.SVRCONN parked — a template SVRCONN "not running"
     # may just mean no client connected recently. Add real channels as
     # {object_type: channel, name: ..., metric: channel_status} targets.
+
+  # Plug-and-play acceptance demo: the pipeline watching its own API through
+  # the generic HTTP/JSON collector — no MQ, no adapter code, config only.
+  - name: self-watch
+    kind: http_json
+    options: {url: "http://127.0.0.1:8000/api/incidents?limit=1"}
+    targets:
+      - object_type: endpoint
+        name: incident-api
+        metric: latest_incident_id     # no rule matches this metric → health tile only
+        json_path: "0.id"
+        labels: {service: signalops, environment: dev}
