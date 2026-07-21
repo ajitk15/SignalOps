@@ -1,0 +1,20 @@
+# Read-only, non-production objects for the deterministic MCP collector.
+# In enterprise use, specify qmgr, environment and service for every object.
+# Objects sharing a service label are correlated into one incident.
+
+poll_interval_seconds: 60
+max_consecutive_failures_before_backoff: 3
+backoff_multiplier: 2
+max_backoff_seconds: 600
+
+queues:
+  - name: QL.INPUT
+    depth_threshold: 5
+    depth_trend_polls: 3        # flag if depth rises for this many consecutive polls
+  - name: QL.LOCAL
+    depth_threshold: 1           # any message on a DLQ is notable
+
+channels: []
+  # SYSTEM.DEF.SVRCONN parked for now — it's a template SVRCONN channel, so
+  # "not running" may just mean no client has connected recently rather than
+  # a real problem. Add real, actively-used channels back in when ready.
