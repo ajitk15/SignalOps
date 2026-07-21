@@ -256,12 +256,14 @@ async def api_list_kb_articles() -> list[dict]:
     kb_dir = PROJECT_ROOT / "knowledge" / "approved"
     if not kb_dir.exists():
         return []
+    kb_refs = snow.load_kb_refs()
     articles = []
     for path in sorted(kb_dir.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True):
         content = path.read_text(encoding="utf-8")
         title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
         articles.append({"slug": path.stem, "title": title_match.group(1).strip() if title_match else path.stem,
-                         "content": content, "updated_at": path.stat().st_mtime})
+                         "content": content, "updated_at": path.stat().st_mtime,
+                         "servicenow": kb_refs.get(path.stem)})
     return articles
 
 
@@ -301,8 +303,9 @@ _INTEGRATIONS = {
     "dynatrace": {"name": "Dynatrace", "purpose": "Open problems on the affected service, attached as context.",
                   "env": ["DYNATRACE_BASE_URL", "DYNATRACE_TOKEN"],
                   "configured": lambda: bool(os.getenv("DYNATRACE_BASE_URL") and os.getenv("DYNATRACE_TOKEN"))},
-    "servicenow": {"name": "ServiceNow", "purpose": "Ticket creation for new incidents (outbox, one incident = one "
-                                                    "ticket) and change-request context for 'what changed?'.",
+    "servicenow": {"name": "ServiceNow", "purpose": "Creates an incident per new SignalOps incident and mirrors "
+                                                    "approved KB articles into Knowledge (create/update/retire); "
+                                                    "reads change requests for 'what changed?' context.",
                    "env": ["SN_INSTANCE_URL", "SN_READ_USER", "SN_READ_PASSWORD", "SN_WRITE_USER", "SN_WRITE_PASSWORD"],
                    "configured": lambda: bool(os.getenv("SN_INSTANCE_URL"))},
 }

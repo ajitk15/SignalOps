@@ -5,6 +5,10 @@
 assignment_group: InfraSupport
 category: Middleware
 
+# Knowledge base for approved-article delivery (kb_knowledge table).
+# sys_id or exact name; empty uses the instance default.
+kb_knowledge_base: ""
+
 severity_map:
   P1: {urgency: 1, impact: 1}
   P2: {urgency: 2, impact: 2}

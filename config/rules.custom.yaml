@@ -1,3 +1,0 @@
-# Custom rules created from the SignalOps dashboard. Loaded after the
-# built-in rules in config/rules.yaml (first match wins).
-rules: []
