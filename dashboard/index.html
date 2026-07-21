@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>MQ Triage Pipeline</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131826; --panel-2: #1a2133; --border: #263049;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #5b8cff;
+    --ok: #3ddc84; --warn: #ffb020; --bad: #ff5c5c;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6fa; --panel:#fff; --panel-2:#f0f2f8; --border:#e1e4ee; --text:#1a1e2b; --muted:#5b6376; --accent:#3b62d6; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:16px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size:16px; margin:0; }
+  .header-actions { display:flex; align-items:center; gap:14px; }
+  .tabs { display:flex; gap:4px; }
+  .tab { background:transparent; color:var(--muted); border:1px solid transparent; border-radius:5px; padding:5px 8px; cursor:pointer; }
+  .tab.active { color:var(--text); border-color:var(--border); background:var(--panel-2); }
+  header .conn { font-size:12px; color:var(--muted); }
+  .conn.live::before { content:"●"; color:var(--ok); margin-right:6px; }
+  .conn.down::before { content:"●"; color:var(--bad); margin-right:6px; }
+  main { padding:20px 24px; display:grid; gap:20px; max-width:1400px; margin:0 auto; }
+  section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; }
+  .tile { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px; }
+  .tile .name { font-weight:600; font-size:13px; word-break:break-all; }
+  .tile .type { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .tile .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .dot.ok { background:var(--ok); } .dot.warn { background:var(--warn); } .dot.unknown { background:var(--muted); }
+  .tile .detail { font-size:12px; color:var(--muted); margin-top:6px; }
+  .lanes { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+  .lane { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; min-height:140px; }
+  .lane h3 { margin:0 0 4px; font-size:14px; }
+  .lane-title { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .mode { font-size:10px; padding:2px 6px; border-radius:999px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; white-space:nowrap; }
+  .mode.rules { color:var(--ok); background:color-mix(in srgb, var(--ok) 14%, transparent); }
+  .mode.ai { color:#bd9cff; background:#bd9cff22; }
+  .pipeline-note { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--muted); font-size:12px; }
+  .pipeline-note strong { color:var(--text); }
+  .lane .model { color:var(--muted); font-size:11px; margin-bottom:10px; }
+  .lane .activity { font-size:13px; min-height:36px; }
+  .lane.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .lane .cost { margin-top:10px; font-size:12px; color:var(--muted); border-top:1px solid var(--border); padding-top:8px; }
+  .cols { display:grid; grid-template-columns:1fr 1.3fr; gap:20px; align-items:start; }
+  .incidents { background:var(--panel); border:1px solid var(--border); border-radius:10px; max-height:400px; overflow:auto; }
+  .incident-row { padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  .incident-row:hover { background:var(--panel-2); }
+  .incident-id { color:var(--accent); font:600 11px ui-monospace,monospace; margin-right:7px; }
+  .incident-time { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+  .sev { font-weight:700; font-size:11px; padding:2px 6px; border-radius:4px; }
+  .sev-P1 { background:var(--bad); color:#fff; } .sev-P2 { background:var(--warn); color:#241a00; }
+  .sev-P3, .sev-P4 { background:var(--panel-2); color:var(--muted); }
+  .trigger-badge { font-size:10px; padding:2px 6px; border-radius:4px; text-transform:uppercase; letter-spacing:.04em; }
+  .trigger-poll { background:var(--panel-2); color:var(--muted); }
+  .trigger-event { background:var(--accent); color:#fff; }
+  .detail-panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; min-height:200px; }
+  .detail-panel pre { white-space:pre-wrap; font:13px/1.5 ui-monospace,monospace; }
+  .incident-summary { color:var(--muted); margin:5px 0 16px; }
+  .stage { border:1px solid var(--border); border-radius:8px; margin:12px 0; overflow:hidden; }
+  .stage-header { display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--panel-2); padding:10px 12px; }
+  .stage-title { font-size:14px; font-weight:700; }
+  .stage-subtitle { color:var(--muted); font-size:11px; margin-top:2px; }
+  .stage-body { padding:12px; }
+  .facts { display:grid; grid-template-columns:minmax(130px, .35fr) 1fr; gap:8px 14px; margin:0; }
+  .facts dt { color:var(--muted); font-size:12px; } .facts dd { margin:0; word-break:break-word; }
+  .facts ul { margin:0; padding-left:18px; } .facts .facts { grid-template-columns:110px 1fr; }
+  .mode.failed { color:var(--bad); background:#ff5c5c22; }
+  .kb-section { margin-top:16px; border-top:1px solid var(--border); padding-top:12px; }
+  .kb-section h4 { margin:0 0 8px; }
+  .kb-actions { display:flex; gap:8px; margin:0 0 10px; }
+  .button { background:var(--accent); border:0; border-radius:6px; color:#fff; padding:7px 10px; cursor:pointer; font-weight:600; font-size:12px; }
+  .button:hover { filter:brightness(1.1); }
+  .button.danger { background:var(--bad); }
+  .kb-library { display:grid; gap:10px; }
+  .kb-library-row { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .kb-library-row h3 { margin:0; font-size:14px; } .kb-library-row p { margin:3px 0 0; color:var(--muted); font-size:12px; }
+  .row-actions { display:flex; gap:7px; } .row-actions .button { background:var(--panel-2); border:1px solid var(--border); color:var(--text); }
+  .hidden { display:none; }
+  .kb-list { display:grid; gap:7px; }
+  .kb-article { display:flex; align-items:center; justify-content:space-between; width:100%; text-align:left; background:var(--panel-2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 10px; cursor:pointer; }
+  .kb-article:hover { border-color:var(--accent); }
+  .kb-score { color:var(--muted); font-size:11px; }
+  dialog { max-width:min(800px, calc(100vw - 32px)); max-height:80vh; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:20px; }
+  dialog::backdrop { background:#0009; }
+  dialog h3 { margin-top:0; } dialog pre { white-space:pre-wrap; font:13px/1.5 ui-monospace,monospace; }
+  .kb-rendered { line-height:1.65; }
+  .kb-rendered h1, .kb-rendered h2, .kb-rendered h3 { margin:20px 0 8px; }
+  .kb-rendered h1 { font-size:20px; } .kb-rendered h2 { font-size:16px; } .kb-rendered h3 { font-size:14px; }
+  .kb-rendered p { margin:8px 0; } .kb-rendered ul, .kb-rendered ol { padding-left:22px; }
+  .kb-rendered code, .kb-rendered pre { background:var(--panel-2); border-radius:4px; }
+  .kb-rendered code { padding:2px 4px; } .kb-rendered pre { padding:10px; overflow:auto; }
+  .dialog-close { float:right; background:transparent; color:var(--text); border:1px solid var(--border); border-radius:5px; padding:4px 8px; cursor:pointer; }
+  .draft-editor { width:100%; min-height:320px; resize:vertical; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:10px; font:13px/1.5 ui-monospace,monospace; }
+  .draft-field { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:7px; margin:6px 0 10px; }
+  .dialog-note { color:var(--muted); font-size:12px; }
+  .empty { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IBM MQ / ACE Triage Pipeline</h1>
+  <div class="header-actions"><div class="tabs"><button class="tab active" data-view="dashboard" onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="kb" onclick="switchView('kb')">Knowledge base</button></div><span id="conn" class="conn down">connecting…</span></div>
+</header>
+<main id="dashboard-view">
+  <div class="pipeline-note"><strong>Processing:</strong> MCP collection + rules always run with no AI. AI is used only for a new, eligible incident that has no strong approved knowledge-base match.</div>
+  <section>
+    <h2>Watched Objects</h2>
+    <div id="tiles" class="tiles"><span class="empty">Waiting for first poll…</span></div>
+  </section>
+
+  <section>
+    <h2>Agent Activity</h2>
+    <div class="lanes">
+      <div class="lane" id="lane-watcher"><div class="lane-title"><h3>1. Collection & rules</h3><span class="mode rules">No AI</span></div><div class="model" id="model-watcher">MCP collector + rules</div><div class="activity" id="activity-watcher">Waiting for collection</div><div class="cost" id="cost-watcher">$0.00000 · 0 AI calls</div></div>
+      <div class="lane" id="lane-diagnostician"><div class="lane-title"><h3>2. Diagnostician</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-diagnostician">Runs only for eligible new incidents</div><div class="activity" id="activity-diagnostician">Not needed yet</div><div class="cost" id="cost-diagnostician">$0.00000 · 0 AI calls</div></div>
+      <div class="lane" id="lane-report_writer"><div class="lane-title"><h3>3. Report writer</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-report_writer">Runs after AI diagnosis</div><div class="activity" id="activity-report_writer">Not needed yet</div><div class="cost" id="cost-report_writer">$0.00000 · 0 AI calls</div></div>
+    </div>
+  </section>
+
+  <section class="cols">
+    <div>
+      <h2>Incidents</h2>
+      <div id="incidents" class="incidents"><div class="empty" style="padding:14px">None yet.</div></div>
+    </div>
+    <div>
+      <h2>Detail</h2>
+      <div id="detail" class="detail-panel"><span class="empty">Select an incident to view Watcher → Diagnostician → Report.</span></div>
+    </div>
+  </section>
+</main>
+<main id="kb-view" class="hidden"><section><h2>Approved knowledge-base articles</h2><p class="empty">Only reviewed articles are listed here. Changes take effect for future incident matching.</p><div id="kb-library" class="kb-library"><span class="empty">Loading approved articles…</span></div></section></main>
+<dialog id="kb-dialog"><button class="dialog-close" onclick="el('kb-dialog').close()">Close</button><h3 id="kb-title"></h3><div id="kb-content" class="kb-rendered"></div></dialog>
+<dialog id="kb-draft-dialog"><button class="dialog-close" onclick="el('kb-draft-dialog').close()">Close</button><h3>Review KB draft</h3><p class="dialog-note">Edit the resolution to the human-confirmed action before approval. Approval publishes the article to the approved KB.</p><label>Approved by</label><input id="kb-approved-by" class="draft-field" placeholder="Your name or team" /><textarea id="kb-draft-content" class="draft-editor"></textarea><p><button id="kb-approve-button" class="button">Approve & publish article</button></p><p id="kb-draft-status" class="dialog-note"></p></dialog>
+<dialog id="kb-editor-dialog"><button class="dialog-close" onclick="el('kb-editor-dialog').close()">Close</button><h3 id="kb-editor-title">Edit KB article</h3><label>Edited by</label><input id="kb-edited-by" class="draft-field" placeholder="Your name or team" /><textarea id="kb-editor-content" class="draft-editor"></textarea><p><button id="kb-save-button" class="button">Save reviewed changes</button></p><p id="kb-editor-status" class="dialog-note"></p></dialog>
+
+<script>
+const tiles = {};
+const laneStats = { watcher: {cost:0, calls:0}, diagnostician: {cost:0, calls:0}, report_writer: {cost:0, calls:0} };
+const incidentIds = new Set();
+
+function el(id) { return document.getElementById(id); }
+function formatTime(timestamp) {
+  return timestamp ? new Date(timestamp * 1000).toLocaleString() : 'time unavailable';
+}
+
+function renderTile(objectName, objectType, isAnomalous) {
+  tiles[objectName] = { objectType, isAnomalous, ts: Date.now() };
+  const container = el('tiles');
+  container.querySelectorAll('.empty').forEach(e => e.remove());
+  let node = document.getElementById('tile-' + objectName);
+  if (!node) {
+    node = document.createElement('div');
+    node.className = 'tile';
+    node.id = 'tile-' + objectName;
+    container.appendChild(node);
+  }
+  const dotClass = isAnomalous ? 'warn' : 'ok';
+  node.innerHTML = `<div class="type">${objectType}</div>
+    <div class="name"><span class="dot ${dotClass}"></span>${objectName}</div>
+    <div class="detail">updated ${new Date().toLocaleTimeString()}</div>`;
+}
+
+function setLaneActive(agent, text) {
+  el('lane-' + agent).classList.add('active');
+  el('activity-' + agent).textContent = text;
+}
+function setLaneIdle(agent, text) {
+  el('lane-' + agent).classList.remove('active');
+  el('activity-' + agent).textContent = text;
+}
+function bumpCost(agent, cost, model) {
+  laneStats[agent].cost += (cost || 0);
+  laneStats[agent].calls += 1;
+  el('cost-' + agent).textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} AI calls`;
+  if (model) el('model-' + agent).textContent = model;
+}
+
+function prependIncident(evt) {
+  const id = evt.payload.incident_id ?? evt.payload.id;
+  if (!id || incidentIds.has(id)) return;
+  incidentIds.add(id);
+  const container = el('incidents');
+  // The empty-state element is a direct child of the incident container.
+  // Remove only that message, not the container itself.
+  container.querySelectorAll('.empty').forEach(e => e.remove());
+  const row = document.createElement('div');
+  row.className = 'incident-row';
+  const trigger = evt.payload.trigger_source || 'poll';
+  const createdAt = evt.payload.created_at ?? evt.ts;
+  row.innerHTML = `<span>
+      <span class="incident-id">#${id}</span>
+      <span class="trigger-badge trigger-${trigger}">${trigger === 'event' ? '⚡ event' : 'poll'}</span>
+      ${evt.payload.title || evt.payload.object_name}
+      <span class="incident-time">Generated: ${formatTime(createdAt)}</span>
+    </span>
+    <span class="sev sev-${evt.payload.severity || 'P4'}">${evt.payload.severity || '—'}</span>`;
+  row.onclick = () => loadIncident(id);
+  container.prepend(row);
+}
+
+async function loadIncident(id) {
+  const res = await fetch('/api/incidents/' + id);
+  const data = await res.json();
+  if (data.error) return;
+  const trigger = data.trigger_source || 'poll';
+  const route = data.report_json?.route;
+  const diagnosisAiStatus = route === 'ai' ? 'AI used' : route === 'ai_failed_rule_only' ? 'AI failed' : 'AI not used';
+  const reportAiStatus = route === 'ai' ? 'AI used' : route === 'ai_failed_rule_only' ? 'Fallback report' : 'Rule / KB result';
+  const diagnosisMode = route === 'ai_failed_rule_only' ? 'failed' : 'ai';
+  el('detail').innerHTML = `
+    <h3><span class="incident-id">Incident #${data.id}</span>${data.title} <span class="sev sev-${data.severity}">${data.severity}</span>
+      <span class="trigger-badge trigger-${trigger}">${trigger === 'event' ? '⚡ event' : 'poll'}</span></h3>
+    <p class="incident-summary">${data.object_name} (${data.object_type}) · Generated: ${formatTime(data.created_at)} · $${(data.total_cost_usd||0).toFixed(5)} total</p>
+    <section class="stage"><div class="stage-header"><div><div class="stage-title">1. Collection</div><div class="stage-subtitle">Live MCP observation and deterministic rules</div></div><span class="mode rules">No AI</span></div><div class="stage-body">${renderDetails(data.watcher_json)}</div></section>
+    <section class="stage"><div class="stage-header"><div><div class="stage-title">2. Diagnostician</div><div class="stage-subtitle">Root-cause investigation</div></div><span class="mode ${diagnosisMode}">${diagnosisAiStatus}</span></div><div class="stage-body">${renderDetails(data.diagnosis_json)}</div></section>
+    <section class="stage"><div class="stage-header"><div><div class="stage-title">3. Report</div><div class="stage-subtitle">Ticket-ready summary and next steps</div></div><span class="mode ${diagnosisMode}">${reportAiStatus}</span></div><div class="stage-body kb-rendered">${renderMarkdown(data.markdown_report || '')}</div></section>
+    <div class="kb-section"><h4>Knowledge base</h4><div class="kb-actions"><button class="button" onclick="openKbDraft(${id})">Create KB draft</button></div><div id="kb-articles" class="kb-list"><span class="empty">Loading relevant approved articles…</span></div></div>
+  `;
+  loadKbArticles(id);
+}
+
+async function loadKbArticles(id) {
+  const container = el('kb-articles');
+  try {
+    const articles = await (await fetch(`/api/incidents/${id}/kb-articles`)).json();
+    container.replaceChildren();
+    if (!articles.length) {
+      container.innerHTML = '<span class="empty">No relevant approved KB articles were found.</span>';
+      return;
+    }
+    for (const article of articles) {
+      const button = document.createElement('button');
+      button.className = 'kb-article';
+      const title = document.createElement('span'); title.textContent = article.title;
+      const score = document.createElement('span'); score.className = 'kb-score'; score.textContent = `${Math.round(article.score * 100)}% match · Open`;
+      button.append(title, score);
+      button.onclick = () => showKbArticle(article);
+      container.appendChild(button);
+    }
+  } catch {
+    container.innerHTML = '<span class="empty">KB articles could not be loaded.</span>';
+  }
+}
+
+function showKbArticle(article) {
+  el('kb-title').textContent = article.title;
+  el('kb-content').innerHTML = renderMarkdown(article.content);
+  el('kb-dialog').showModal();
+}
+
+function escapeHtml(value) {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function readableKey(key) {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function renderFactValue(value) {
+  if (Array.isArray(value)) return `<ul>${value.map(item => `<li>${renderFactValue(item)}</li>`).join('')}</ul>`;
+  if (value && typeof value === 'object') return `<dl class="facts">${Object.entries(value).map(([key, item]) => `<dt>${escapeHtml(readableKey(key))}</dt><dd>${renderFactValue(item)}</dd>`).join('')}</dl>`;
+  return escapeHtml(value === null || value === undefined || value === '' ? '—' : String(value));
+}
+
+function renderDetails(value) {
+  if (!value || typeof value !== 'object') return `<span class="empty">No details recorded.</span>`;
+  return `<dl class="facts">${Object.entries(value).map(([key, item]) => `<dt>${escapeHtml(readableKey(key))}</dt><dd>${renderFactValue(item)}</dd>`).join('')}</dl>`;
+}
+
+function renderInline(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+}
+
+function renderMarkdown(markdown) {
+  const lines = markdown.replace(/<!--[\s\S]*?-->/g, '').replace(/\r/g, '').split('\n');
+  const html = []; let listType = null; let inCode = false; let code = [];
+  const closeList = () => { if (listType) { html.push(`</${listType}>`); listType = null; } };
+  for (const line of lines) {
+    if (line.startsWith('```')) {
+      if (inCode) { html.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); code = []; }
+      else closeList();
+      inCode = !inCode; continue;
+    }
+    if (inCode) { code.push(line); continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    const numbered = line.match(/^\d+\.\s+(.+)$/);
+    if (heading) { closeList(); const level = heading[1].length; html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`); }
+    else if (bullet || numbered) {
+      const type = bullet ? 'ul' : 'ol';
+      if (listType && listType !== type) closeList();
+      if (!listType) { html.push(`<${type}>`); listType = type; }
+      html.push(`<li>${renderInline((bullet || numbered)[1])}</li>`);
+    } else if (!line.trim()) { closeList(); }
+    else { closeList(); html.push(`<p>${renderInline(line)}</p>`); }
+  }
+  if (inCode) html.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+  closeList();
+  return html.join('');
+}
+
+async function openKbDraft(id) {
+  const status = el('kb-draft-status');
+  status.textContent = 'Generating draft…';
+  el('kb-draft-content').value = '';
+  el('kb-draft-dialog').showModal();
+  try {
+    const draft = await (await fetch(`/api/incidents/${id}/kb-draft`)).json();
+    el('kb-draft-content').value = draft.markdown || '';
+    status.textContent = 'Review the draft, confirm the resolution, then approve it.';
+    el('kb-approve-button').onclick = () => approveKbDraft(id);
+  } catch {
+    status.textContent = 'Unable to generate the draft.';
+  }
+}
+
+async function approveKbDraft(id) {
+  const approvedBy = el('kb-approved-by').value.trim();
+  const markdown = el('kb-draft-content').value.trim();
+  const status = el('kb-draft-status');
+  if (!approvedBy || !markdown) {
+    status.textContent = 'Enter the approving person or team and keep the reviewed article content.';
+    return;
+  }
+  if (!confirm('Confirm that the Resolution is human-reviewed and approved for future incident guidance.')) return;
+  status.textContent = 'Publishing approved article…';
+  try {
+    const response = await fetch(`/api/incidents/${id}/kb-approve`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({markdown, approved_by: approvedBy})
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Approval failed');
+    status.textContent = `Published: ${result.filename}`;
+    loadKbArticles(id);
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+
+async function loadIncidents() {
+  const incidents = await (await fetch('/api/incidents')).json();
+  incidents.reverse().forEach(incident => prependIncident({payload: incident}));
+}
+
+function switchView(view) {
+  el('dashboard-view').classList.toggle('hidden', view !== 'dashboard');
+  el('kb-view').classList.toggle('hidden', view !== 'kb');
+  document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
+  if (view === 'kb') loadKbLibrary();
+}
+
+async function loadKbLibrary() {
+  const container = el('kb-library');
+  try {
+    const articles = await (await fetch('/api/kb-articles')).json();
+    container.replaceChildren();
+    if (!articles.length) { container.innerHTML = '<span class="empty">No approved KB articles yet.</span>'; return; }
+    for (const article of articles) {
+      const row = document.createElement('div'); row.className = 'kb-library-row';
+      const info = document.createElement('div');
+      const title = document.createElement('h3'); title.textContent = article.title;
+      const updated = document.createElement('p'); updated.textContent = `Last updated: ${formatTime(article.updated_at)}`;
+      info.append(title, updated);
+      const actions = document.createElement('div'); actions.className = 'row-actions';
+      const view = document.createElement('button'); view.className = 'button'; view.textContent = 'View'; view.onclick = () => showKbArticle(article);
+      const edit = document.createElement('button'); edit.className = 'button'; edit.textContent = 'Edit'; edit.onclick = () => openKbEditor(article);
+      const remove = document.createElement('button'); remove.className = 'button danger'; remove.textContent = 'Delete'; remove.onclick = () => deleteKbArticle(article);
+      actions.append(view, edit, remove); row.append(info, actions); container.appendChild(row);
+    }
+  } catch { container.innerHTML = '<span class="empty">KB articles could not be loaded.</span>'; }
+}
+
+function openKbEditor(article) {
+  el('kb-editor-title').textContent = `Edit: ${article.title}`;
+  el('kb-editor-content').value = article.content.replace(/<!--[\s\S]*?-->\s*/g, '');
+  el('kb-editor-status').textContent = 'Review all changes before saving.';
+  el('kb-editor-dialog').showModal();
+  el('kb-save-button').onclick = () => saveKbArticle(article.slug);
+}
+
+async function saveKbArticle(slug) {
+  const editedBy = el('kb-edited-by').value.trim(); const markdown = el('kb-editor-content').value.trim(); const status = el('kb-editor-status');
+  if (!editedBy || !markdown) { status.textContent = 'Enter the editor and retain article content.'; return; }
+  if (!confirm('Confirm these changes were reviewed and are approved for future incident guidance.')) return;
+  const response = await fetch(`/api/kb-articles/${slug}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({markdown, edited_by:editedBy})});
+  const result = await response.json(); status.textContent = response.ok ? 'Saved.' : (result.detail || 'Save failed');
+  if (response.ok) loadKbLibrary();
+}
+
+async function deleteKbArticle(article) {
+  if (!confirm(`Delete approved KB article "${article.title}"? This cannot be undone.`)) return;
+  const response = await fetch(`/api/kb-articles/${article.slug}`, {method:'DELETE'}); const result = await response.json();
+  if (!response.ok) { alert(result.detail || 'Delete failed'); return; }
+  loadKbLibrary();
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws/events`);
+  ws.onopen = () => { el('conn').textContent = 'live'; el('conn').className = 'conn live'; };
+  ws.onclose = () => { el('conn').textContent = 'disconnected — retrying…'; el('conn').className = 'conn down'; setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (msg) => {
+    const evt = JSON.parse(msg.data);
+    switch (evt.type) {
+      case 'observation_received': {
+        // Enterprise collection is rule-based, not the legacy AI Watcher.
+        // Treat each normalized observation as Watcher activity without
+        // recording it as a model call or cost.
+        const observation = evt.payload.observation;
+        const isAnomalous = Boolean(evt.payload.finding);
+        renderTile(observation.object_name, observation.object_type, isAnomalous);
+        setLaneIdle('watcher', `Last: ${observation.object_name} (${isAnomalous ? 'anomaly' : 'ok'})`);
+        el('model-watcher').textContent = 'MCP collector + rules';
+        break;
+      }
+      case 'poll_started':
+        setLaneActive('watcher', `Polling ${evt.payload.object_name}…`);
+        break;
+      case 'poll_result':
+        renderTile(evt.payload.object_name, evt.payload.object_type, evt.payload.is_anomalous);
+        setLaneIdle('watcher', `Last: ${evt.payload.object_name} (${evt.payload.is_anomalous ? 'anomaly' : 'ok'})`);
+        bumpCost('watcher', evt.payload.cost_usd, evt.payload.model);
+        break;
+      case 'poll_failed':
+        setLaneIdle('watcher', `Failed: ${evt.payload.object_name}`);
+        break;
+      case 'agent_started':
+        setLaneActive(evt.payload.agent, `Working on ${evt.payload.object_name}…`);
+        break;
+      case 'agent_completed':
+        setLaneIdle(evt.payload.agent, `Done: ${evt.payload.object_name}`);
+        bumpCost(evt.payload.agent, evt.payload.cost_usd, evt.payload.model);
+        break;
+      case 'agent_failed':
+        setLaneIdle(evt.payload.agent, `Failed: ${evt.payload.object_name}`);
+        break;
+      case 'incident_created':
+        prependIncident(evt);
+        break;
+    }
+  };
+}
+connect();
+loadIncidents();
+</script>
+</body>
+</html>

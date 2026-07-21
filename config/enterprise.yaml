@@ -1,0 +1,11 @@
+# Enterprise pipeline controls. Collection and detection never call an LLM.
+detection:
+  dedup_window_seconds: 900
+  minimum_ai_severity: P3
+  maximum_ai_calls_per_incident: 2
+  default_depth_threshold: 1000
+  trend_points: 3
+
+knowledge:
+  similarity_threshold: 0.55
+  zero_ai_reuse_threshold: 0.80
