@@ -97,7 +97,7 @@ class CollectorResilienceTests(unittest.TestCase):
         logging.disable(logging.CRITICAL)
         self.addCleanup(logging.disable, logging.NOTSET)
 
-    def _run_cycles(self, failures: int, cycles: int) -> list[float]:
+    def _run_cycles(self, failures: int, cycles: int, yields=None) -> list[float]:
         """Drive collect_forever, failing the first N cycles, capturing each sleep."""
         delays: list[float] = []
         calls = {"n": 0}
@@ -106,7 +106,7 @@ class CollectorResilienceTests(unittest.TestCase):
             calls["n"] += 1
             if calls["n"] <= failures:
                 raise RuntimeError("mcp unreachable")
-            return []
+            return [{"outcome": "healthy"}] if yields is None else yields
 
         async def capture_sleep(seconds):
             delays.append(seconds)
@@ -133,6 +133,20 @@ class CollectorResilienceTests(unittest.TestCase):
     def test_backoff_is_capped(self):
         delays = self._run_cycles(failures=20, cycles=12)
         self.assertEqual(max(delays), 600)
+
+    def test_successful_cycle_with_no_readings_is_not_reported_as_ok(self):
+        """A reachable MCP server sitting in front of dead queue managers still
+        collects nothing; calling that "ok" is the silent failure this guards."""
+        delays = self._run_cycles(failures=0, cycles=2, yields=[])
+        self.assertEqual(collector_health()["status"], "degraded")
+        # The endpoint is healthy, so the poll cadence must stay normal.
+        self.assertEqual(delays, [60, 60])
+
+    def test_readings_restore_ok_from_degraded(self):
+        self._run_cycles(failures=0, cycles=1, yields=[])
+        self.assertEqual(collector_health()["status"], "degraded")
+        self._run_cycles(failures=0, cycles=1)
+        self.assertEqual(collector_health()["status"], "ok")
 
 
 if __name__ == "__main__": unittest.main()
