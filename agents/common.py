@@ -19,50 +19,46 @@ CONFIG_DIR = ROOT / "config"
 
 logger = logging.getLogger("mq_pipeline")
 
-# The MQ+ACE MCP server (C:\Workspace\accready\mqacemcp\mqacemcpserver) runs
-# streamable-http with TLS (self-signed cert) and HTTP Basic Auth by default
-# — see its logs/app-*.log on startup. Configured here via env vars rather
-# than a checked-in .mcp.json so no credential ever lives in a repo file.
-MQ_MCP_URL = os.environ.get("MQ_MCP_URL", "https://localhost:8010/mcp")
-MQ_MCP_AUTH_USER = os.environ.get("MQ_MCP_AUTH_USER", "mcpadmin")
-MQ_MCP_AUTH_PASSWORD = os.environ.get("MQ_MCP_AUTH_PASSWORD", "")
-# Path to the server's self-signed cert, so the CLI subprocess can trust it
-# without disabling TLS verification outright. Not secret — just a public
-# cert file — so a real default path is fine here.
-MQ_MCP_TLS_CERT = os.environ.get(
-    "MQ_MCP_TLS_CERT", r"C:\Workspace\accready\mqacemcp\certs\cert.pem"
-)
+# MCP endpoints are configured per platform profile (config/platforms.yaml)
+# via env-var NAMES, so no credential ever lives in a repo file. Historical
+# note: the MQ server runs streamable-http with TLS (self-signed cert) and
+# HTTP Basic Auth by default.
 
-
-def _mcp_servers_config() -> dict[str, Any]:
-    server: dict[str, Any] = {"type": "http", "url": MQ_MCP_URL}
-    if MQ_MCP_AUTH_PASSWORD:
-        token = base64.b64encode(
-            f"{MQ_MCP_AUTH_USER}:{MQ_MCP_AUTH_PASSWORD}".encode()
-        ).decode()
+def _mcp_servers_config(mcp_server: dict | None) -> dict[str, Any]:
+    """Build the agent's MCP config from a platform profile's env-var names."""
+    if not mcp_server:
+        return {}
+    url = os.environ.get(mcp_server.get("url_env", ""), "")
+    if not url:
+        logger.warning("MCP server %s has no URL configured (%s unset) — agent runs without tools.",
+                       mcp_server.get("name"), mcp_server.get("url_env"))
+        return {}
+    server: dict[str, Any] = {"type": "http", "url": url}
+    user = os.environ.get(mcp_server.get("user_env", ""), "")
+    password = os.environ.get(mcp_server.get("password_env", ""), "")
+    if user and password:
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
         server["headers"] = {"Authorization": f"Basic {token}"}
     else:
-        logger.warning(
-            "MQ_MCP_AUTH_PASSWORD not set — connecting to %s without Basic Auth, "
-            "which will likely be rejected by the server.",
-            MQ_MCP_URL,
-        )
-    return {"ibm-mq": server}
+        logger.warning("MCP server %s: no Basic Auth credentials set — the server may reject the connection.",
+                       mcp_server.get("name"))
+    return {mcp_server["name"]: server}
 
 
-def _subprocess_env() -> dict[str, str] | None:
-    """Trust the MQ MCP server's self-signed cert for the spawned CLI's TLS
+def _subprocess_env(mcp_server: dict | None) -> dict[str, str]:
+    """Trust the MCP server's self-signed cert for the spawned CLI's TLS
     stack, instead of disabling certificate verification altogether."""
     # This workflow uses the locally authenticated Claude Code session.  When
     # ANTHROPIC_API_KEY is inherited from the application environment, Claude
     # Code gives it precedence and disables its connector/MCP path, causing
     # the opaque "error result: success" failure before an agent can run.
     env = {"ANTHROPIC_API_KEY": ""}
-    if MQ_MCP_TLS_CERT and Path(MQ_MCP_TLS_CERT).exists():
-        env["NODE_EXTRA_CA_CERTS"] = MQ_MCP_TLS_CERT
-        return env
-    logger.warning("MQ MCP TLS cert not found at %s — HTTPS connection may fail "
-                   "certificate verification.", MQ_MCP_TLS_CERT)
+    cert = os.environ.get((mcp_server or {}).get("tls_cert_env", ""), "")
+    if cert and Path(cert).exists():
+        env["NODE_EXTRA_CA_CERTS"] = cert
+    elif cert:
+        logger.warning("MCP TLS cert not found at %s — HTTPS connection may fail "
+                       "certificate verification.", cert)
     return env
 
 
@@ -153,19 +149,21 @@ async def call_agent_json(
     system_prompt: str,
     user_prompt: str,
     allowed_tools: list[str],
+    mcp_server: dict | None = None,
 ) -> AgentCallResult:
     """Call a single-shot agent, expecting it to reply with JSON.
 
-    Read-only by construction: callers only ever pass DISPLAY-class MQ tool
-    names in allowed_tools (see agents/diagnostician.py).
+    Read-only by construction: callers only ever pass inspect/DISPLAY-class
+    tool names in allowed_tools (see the platform profile's
+    investigation_tools).
     """
     start = time.monotonic()
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         model=model,
         allowed_tools=allowed_tools,
-        mcp_servers=_mcp_servers_config(),
-        env=_subprocess_env(),
+        mcp_servers=_mcp_servers_config(mcp_server),
+        env=_subprocess_env(mcp_server),
         # No terminal is attached under uvicorn, so the SDK's default
         # permission_mode ("default", which prompts for tool approval)
         # would hang forever. allowed_tools already restricts each agent to

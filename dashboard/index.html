@@ -745,18 +745,20 @@
     // status is 'ok' | 'anomaly' | 'unknown'; timestamp is when the reading was
     // taken (epoch seconds), not when this tile happened to be rendered — a tile
     // rebuilt from replayed event history is not a fresh observation.
-    function renderTile(objectName, objectType, status, timestamp) {
+    // Tiles are keyed by source AND name: two sources may watch same-named objects.
+    function renderTile(source, objectName, objectType, status, timestamp) {
       const container = el('tiles');
       container.querySelectorAll('.empty').forEach(e => e.remove());
-      let node = document.getElementById('tile-' + objectName);
+      const tileId = 'tile-' + source + ':' + objectName;
+      let node = document.getElementById(tileId);
       if (!node) {
         node = document.createElement('div');
         node.className = 'tile';
-        node.id = 'tile-' + objectName;
+        node.id = tileId;
         container.appendChild(node);
       }
       const dotClass = status === 'anomaly' ? 'warn' : status === 'ok' ? 'ok' : 'unknown';
-      node.innerHTML = `<div class="type">${esc(objectType)}</div>
+      node.innerHTML = `<div class="type">${esc(objectType)} · ${esc(source)}</div>
     <div class="name"><span class="dot ${dotClass}"></span>${esc(objectName)}</div>
     <div class="detail">${timestamp ? 'updated ' + formatClock(timestamp) : 'awaiting first poll'}</div>`;
     }
@@ -984,7 +986,7 @@
     function applySnapshot(payload) {
       const objects = payload.watched_objects || [];
       if (objects.length) {
-        objects.forEach(o => renderTile(o.object_name, o.object_type, o.status, o.timestamp));
+        objects.forEach(o => renderTile(o.source, o.object_name, o.object_type, o.status, o.timestamp));
       } else if (payload.collector && payload.collector.status === 'degraded') {
         el('tiles').innerHTML = '<span class="empty">Collection is running but returned no readings — check that the queue managers behind the MCP server are reachable.</span>';
       } else {
@@ -1086,22 +1088,11 @@
             // recording it as a model call or cost.
             const observation = evt.payload.observation;
             const isAnomalous = Boolean(evt.payload.finding);
-            renderTile(observation.object_name, observation.object_type, isAnomalous ? 'anomaly' : 'ok', observation.timestamp);
+            renderTile(observation.source, observation.object_name, observation.object_type, isAnomalous ? 'anomaly' : 'ok', observation.timestamp);
             setLaneIdle('watcher', `Last: ${observation.object_name} (${isAnomalous ? 'anomaly' : 'ok'})`);
             el('model-watcher').textContent = 'MCP collector + rules';
             break;
           }
-          case 'poll_started':
-            setLaneActive('watcher', `Polling ${evt.payload.object_name}…`);
-            break;
-          case 'poll_result':
-            renderTile(evt.payload.object_name, evt.payload.object_type, evt.payload.is_anomalous ? 'anomaly' : 'ok', evt.ts);
-            setLaneIdle('watcher', `Last: ${evt.payload.object_name} (${evt.payload.is_anomalous ? 'anomaly' : 'ok'})`);
-            bumpCost('watcher', evt.payload.cost_usd, evt.payload.model);
-            break;
-          case 'poll_failed':
-            setLaneIdle('watcher', `Failed: ${evt.payload.object_name}`);
-            break;
           case 'agent_started':
             setLaneActive(evt.payload.agent, `Working on ${evt.payload.object_name}…`);
             break;
