@@ -1,0 +1,67 @@
+# Declarative detection rules. Deterministic, zero-LLM — this file replaces the
+# hardcoded if/elif chain that used to live in detection.RuleEngine.evaluate.
+#
+# Semantics (all four preserve the original elif engine exactly):
+#   - Rules are evaluated top to bottom; the first rule whose `when` matches AND
+#     whose condition is true produces the Finding.
+#   - A rule whose `when` matches but whose condition is false FALLS THROUGH to
+#     the next rule (this is what makes the ordering equivalent to elif).
+#   - Trend history updates for every observation of a metric that has a
+#     `rising` rule, before any rule is selected — a higher rule winning must
+#     not starve a later rule's state.
+#   - `not_in` comparisons are case-folded (status values arrive as "Retrying",
+#     "RETRYING", "retrying" depending on the source).
+#
+# Condition values:
+#   value: "${threshold}" uses the per-target threshold from the observation,
+#   falling back to `default`. A default of "${default_depth_threshold}" reads
+#   the engine setting sourced from config/enterprise.yaml.
+#
+# `escalate.at_factor` is INCLUSIVE: value >= threshold * factor.
+#
+# Message templates may use: {value} {value_int} {value_text} {threshold}
+# {threshold_int} {history} {trend_points} {metric} {object_name}
+
+rules:
+  - id: dlq-not-empty
+    # Either half may identify a DLQ: the name-substring heuristic is the only
+    # live trigger for objects with no `role` label configured.
+    when:
+      metric: queue_depth
+      any_of:
+        - name_contains: DLQ
+        - label_equals: {role: dlq}
+    condition: {type: greater_than, value: 0}
+    severity: P2
+    message: "DLQ contains {value_int} message(s)"
+
+  - id: depth-over-threshold
+    when: {metric: queue_depth}
+    condition: {type: greater_than, value: "${threshold}", default: "${default_depth_threshold}"}
+    severity: P3
+    escalate: {at_factor: 2, severity: P2}
+    message: "Queue depth {value_int} exceeds threshold {threshold_int}"
+
+  - id: depth-rising
+    when: {metric: queue_depth}
+    condition: {type: rising}
+    severity: P3
+    message: "Queue depth is rising across {trend_points} observations: {history}"
+
+  - id: channel-not-running
+    when: {metric: channel_status}
+    condition: {type: not_in, values: [RUNNING, INACTIVE]}
+    severity: P2
+    message: "Channel status is {value_text}"
+
+  - id: ace-flow-not-running
+    when: {metric: ace_flow_status}
+    condition: {type: not_in, values: [RUNNING, STARTED]}
+    severity: P2
+    message: "ACE flow status is {value_text}"
+
+  - id: error-count
+    when: {metric: [error_count, exception_count]}
+    condition: {type: greater_than, value: "${threshold}", default: 0}
+    severity: P2
+    message: "{metric} is {value}"

@@ -1,0 +1,12 @@
+# Custom rules created from the SignalOps dashboard. Loaded after the
+# built-in rules in config/rules.yaml (first match wins).
+rules:
+- id: java-heap-high
+  when:
+    metric: heap_used_percent
+  condition:
+    type: greater_than
+    value: ${threshold}
+    default: 85
+  severity: P3
+  message: Heap usage {value_int}% exceeds {threshold_int}%
