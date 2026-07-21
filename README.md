@@ -1,8 +1,20 @@
-# Enterprise MQ / ACE incident intelligence pipeline
+# SignalOps — incident intelligence pipeline
 
-This project monitors IBM MQ and ACE with low AI cost. Collection, threshold
-checks, trend detection, correlation, and duplicate suppression are ordinary
-Python code. AI is reserved for new incidents that need investigation.
+SignalOps monitors middleware and application platforms with low AI cost.
+Collection, threshold checks, trend detection, correlation, and duplicate
+suppression are ordinary Python code. AI is reserved for new incidents that
+need investigation.
+
+Collection is plug-and-play: a source in `config/watchlist.yaml` names a
+collector kind (`mq_mcp`, `http_json`, `prometheus`, or your own class in
+`collectors/`), detection rules live in `config/rules.yaml` plus custom rules
+managed from the dashboard's Rules tab (with templates for IBM MQ, IBM ACE,
+Apigee, DataPower and Java/JVM), and the Agents tab shows the full workflow —
+Collection → AI gate → Diagnostician → Report writer — whether or not AI is
+enabled. ServiceNow ticketing runs as a dry-run outbox by default
+(`SERVICENOW_MODE=live` to create real tickets); Splunk, Dynatrace and
+ServiceNow status live in the Integrations tab, with credentials configured
+via environment variables only.
 
 ## Processing flow
 

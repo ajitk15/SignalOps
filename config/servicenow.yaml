@@ -1,0 +1,12 @@
+# ServiceNow delivery mapping. Credentials are NOT here — they come from the
+# environment (SN_INSTANCE_URL, SN_READ_USER/PASSWORD, SN_WRITE_USER/PASSWORD),
+# and SERVICENOW_MODE controls delivery: dry_run (default) | live | off.
+
+assignment_group: InfraSupport
+category: Middleware
+
+severity_map:
+  P1: {urgency: 1, impact: 1}
+  P2: {urgency: 2, impact: 2}
+  P3: {urgency: 3, impact: 3}
+  P4: {urgency: 3, impact: 3}

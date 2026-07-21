@@ -12,7 +12,7 @@
 # DLQ name heuristic either, so adding the label now would change severity
 # behaviour; it stays a threshold-watched queue until that change is intended.
 
-dashboard_title: MQ / ACE Triage Pipeline
+dashboard_title: SignalOps
 poll_interval_seconds: 60
 max_consecutive_failures_before_backoff: 3
 backoff_multiplier: 2

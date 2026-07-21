@@ -13,6 +13,7 @@ from agents.common import AgentCallResult, load_agent_models, load_watchlist
 from detection import Correlator, Finding, Observation, RuleEngine, SEVERITY_RANK
 from events import Event, bus
 from integrations.context import readers_from_env
+from integrations.servicenow import reader_from_env as servicenow_reader
 from knowledge.service import search as search_kb
 from platforms import PlatformProfile, profile_for
 import store
@@ -26,6 +27,7 @@ class EnterprisePipeline:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         detection_cfg, knowledge_cfg = config["detection"], config["knowledge"]
         self.use_ai = use_ai
+        self._detection_cfg = detection_cfg
         self.rules = rule_engine or RuleEngine(default_depth_threshold=detection_cfg["default_depth_threshold"],
                                                trend_points=detection_cfg["trend_points"])
         self.correlator = correlator or Correlator(detection_cfg["dedup_window_seconds"])
@@ -51,6 +53,12 @@ class EnterprisePipeline:
 
     def watched_objects(self) -> list[dict]:
         return list(self.latest_observations.values())
+
+    def reload_rules(self) -> None:
+        """Rebuild the rule engine after a rules file change. Trend history
+        resets — acceptable for a rule edit, and stated in the UI."""
+        self.rules = RuleEngine(default_depth_threshold=self._detection_cfg["default_depth_threshold"],
+                                trend_points=self._detection_cfg["trend_points"])
 
     async def ingest(self, observation: Observation) -> dict:
         finding = self.rules.evaluate(observation)
@@ -126,6 +134,18 @@ class EnterprisePipeline:
         if dynatrace:
             try: result["dynatrace"] = await asyncio.to_thread(dynatrace.problems, f'type("SERVICE"),entityName.equals("{service}")')
             except Exception as exc: result["dynatrace_error"] = str(exc)
+        servicenow = servicenow_reader()
+        if servicenow:
+            # "What changed?" — the first question on-call asks. Truncated hard:
+            # this text reaches agent prompts and is treated there as untrusted
+            # evidence, never as instructions.
+            try:
+                changes = await asyncio.to_thread(servicenow.recent_changes, service)
+                result["recent_changes"] = [
+                    {k: str(change.get(k, ""))[:200] for k in ("number", "short_description", "state", "sys_updated_on")}
+                    for change in changes[:5]]
+            except Exception as exc:
+                result["servicenow_error"] = str(exc)
         return result
 
     def _save(self, finding, diagnosis, report, cost, context, route):

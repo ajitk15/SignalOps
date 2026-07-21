@@ -14,6 +14,9 @@ import yaml
 
 SEVERITY_RANK = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
 RULES_PATH = Path(__file__).resolve().parent / "config" / "rules.yaml"
+# UI-created rules live in their own file, appended AFTER built-ins: with
+# first-match-wins they add detections but cannot shadow built-in behaviour.
+CUSTOM_RULES_PATH = Path(__file__).resolve().parent / "config" / "rules.custom.yaml"
 
 
 @dataclass
@@ -55,6 +58,8 @@ class RuleEngine:
         self.settings = {"default_depth_threshold": default_depth_threshold}
         self.trend_points = trend_points
         self.rules = yaml.safe_load((rules_path or RULES_PATH).read_text(encoding="utf-8"))["rules"]
+        if rules_path is None and CUSTOM_RULES_PATH.exists():
+            self.rules = self.rules + (yaml.safe_load(CUSTOM_RULES_PATH.read_text(encoding="utf-8")) or {}).get("rules", [])
         self._history: dict[str, list[float]] = {}
         # Metrics with at least one `rising` rule need history for every
         # observation, whichever rule ends up firing.

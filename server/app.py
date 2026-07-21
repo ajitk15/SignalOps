@@ -41,6 +41,7 @@ try:
 except Exception:  # a broken watchlist must not stop the server from starting
     DASHBOARD_TITLE = "Incident Triage Pipeline"
 _enterprise_collect_task: asyncio.Task | None = None
+_servicenow_task: asyncio.Task | None = None
 
 
 def _log_collector_exit(task: asyncio.Task) -> None:
@@ -52,15 +53,19 @@ def _log_collector_exit(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _enterprise_collect_task
+    global _enterprise_collect_task, _servicenow_task
     if os.getenv("ENABLE_MQ_ACE_COLLECTOR", "false").lower() == "true":
         _enterprise_collect_task = asyncio.create_task(collect_forever(enterprise_pipeline))
         # collect_forever is meant to be immortal; if it ever returns or raises,
         # say so rather than letting polling stop with nothing in the log.
         _enterprise_collect_task.add_done_callback(_log_collector_exit)
+    from integrations.servicenow import deliver_forever
+    _servicenow_task = asyncio.create_task(deliver_forever())
     yield
     if _enterprise_collect_task:
         _enterprise_collect_task.cancel()
+    if _servicenow_task:
+        _servicenow_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -81,6 +86,88 @@ async def index() -> FileResponse:
 @app.get("/api/incidents")
 async def api_list_incidents(limit: int = 50) -> list[dict]:
     return store.list_incidents(limit=limit)
+
+
+# --- rules management --------------------------------------------------------
+# Built-in rules (config/rules.yaml) carry the behavioural-equivalence
+# guarantee and stay file-managed/read-only. The UI owns rules.custom.yaml,
+# which loads AFTER built-ins so first-match-wins means custom rules add
+# detections without shadowing existing behaviour.
+
+from detection import CUSTOM_RULES_PATH, RULES_PATH  # noqa: E402
+import yaml  # noqa: E402
+
+RULE_TEMPLATES_PATH = PROJECT_ROOT / "config" / "rule_templates.yaml"
+_KNOWN_CONDITIONS = {"greater_than", "not_in", "rising"}
+
+
+class RuleRequest(BaseModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    metric: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
+    condition: dict
+    severity: str = Field(pattern=r"^P[1-4]$")
+    message: str = Field(min_length=3, max_length=200)
+    escalate: dict | None = None
+
+
+def _load_custom_rules() -> list[dict]:
+    if not CUSTOM_RULES_PATH.exists():
+        return []
+    return (yaml.safe_load(CUSTOM_RULES_PATH.read_text(encoding="utf-8")) or {}).get("rules", [])
+
+
+def _write_custom_rules(rules: list[dict]) -> None:
+    CUSTOM_RULES_PATH.write_text(
+        "# Custom rules created from the SignalOps dashboard. Loaded after the\n"
+        "# built-in rules in config/rules.yaml (first match wins).\n"
+        + yaml.safe_dump({"rules": rules}, sort_keys=False, allow_unicode=True),
+        encoding="utf-8")
+
+
+@app.get("/api/rules")
+async def api_list_rules() -> dict:
+    builtin = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))["rules"]
+    templates = yaml.safe_load(RULE_TEMPLATES_PATH.read_text(encoding="utf-8"))["categories"] \
+        if RULE_TEMPLATES_PATH.exists() else []
+    return {"builtin": builtin, "custom": _load_custom_rules(), "templates": templates}
+
+
+@app.post("/api/rules")
+async def api_create_rule(payload: RuleRequest) -> dict:
+    condition_type = payload.condition.get("type")
+    if condition_type not in _KNOWN_CONDITIONS:
+        raise HTTPException(status_code=422, detail=f"condition.type must be one of {sorted(_KNOWN_CONDITIONS)}")
+    if condition_type == "not_in" and not payload.condition.get("values"):
+        raise HTTPException(status_code=422, detail="not_in requires a values list")
+    custom = _load_custom_rules()
+    builtin_ids = {r["id"] for r in yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))["rules"]}
+    if payload.id in builtin_ids or any(r["id"] == payload.id for r in custom):
+        raise HTTPException(status_code=409, detail="a rule with this id already exists")
+    rule = {"id": payload.id, "when": {"metric": payload.metric},
+            "condition": payload.condition, "severity": payload.severity, "message": payload.message}
+    if payload.escalate:
+        rule["escalate"] = payload.escalate
+    custom.append(rule)
+    _write_custom_rules(custom)
+    try:
+        enterprise_pipeline.reload_rules()  # validates the file end-to-end
+    except Exception as exc:
+        custom.pop()
+        _write_custom_rules(custom)
+        enterprise_pipeline.reload_rules()
+        raise HTTPException(status_code=422, detail=f"rule rejected by the engine: {exc}")
+    return {"status": "created", "rule": rule}
+
+
+@app.delete("/api/rules/{rule_id}")
+async def api_delete_rule(rule_id: str) -> dict:
+    custom = _load_custom_rules()
+    remaining = [r for r in custom if r["id"] != rule_id]
+    if len(remaining) == len(custom):
+        raise HTTPException(status_code=404, detail="custom rule not found (built-in rules are file-managed)")
+    _write_custom_rules(remaining)
+    enterprise_pipeline.reload_rules()
+    return {"status": "deleted", "id": rule_id}
 
 
 @app.get("/api/incidents/{incident_id}")
@@ -197,6 +284,73 @@ async def api_delete_kb_article(slug: str) -> dict:
     return {"status": "deleted", "filename": path.name}
 
 
+# --- integrations status + connection tests ---------------------------------
+# Status never includes credential values — only which env var NAMES are set.
+
+from integrations import context as ctx  # noqa: E402
+from integrations import servicenow as snow  # noqa: E402
+from integrations.mq_ace_mcp import MqAceMcpCollector  # noqa: E402
+
+_INTEGRATIONS = {
+    "mq_mcp": {"name": "IBM MQ / ACE MCP", "purpose": "Live queue, channel and flow collection (read-only).",
+               "env": ["MQ_MCP_URL", "MQ_MCP_AUTH_USER", "MQ_MCP_AUTH_PASSWORD", "MQ_MCP_TLS_CERT"],
+               "configured": lambda: bool(os.getenv("MQ_MCP_URL"))},
+    "splunk": {"name": "Splunk", "purpose": "Historical log context attached to new incidents.",
+               "env": ["SPLUNK_BASE_URL", "SPLUNK_TOKEN"],
+               "configured": lambda: bool(os.getenv("SPLUNK_BASE_URL") and os.getenv("SPLUNK_TOKEN"))},
+    "dynatrace": {"name": "Dynatrace", "purpose": "Open problems on the affected service, attached as context.",
+                  "env": ["DYNATRACE_BASE_URL", "DYNATRACE_TOKEN"],
+                  "configured": lambda: bool(os.getenv("DYNATRACE_BASE_URL") and os.getenv("DYNATRACE_TOKEN"))},
+    "servicenow": {"name": "ServiceNow", "purpose": "Ticket creation for new incidents (outbox, one incident = one "
+                                                    "ticket) and change-request context for 'what changed?'.",
+                   "env": ["SN_INSTANCE_URL", "SN_READ_USER", "SN_READ_PASSWORD", "SN_WRITE_USER", "SN_WRITE_PASSWORD"],
+                   "configured": lambda: bool(os.getenv("SN_INSTANCE_URL"))},
+}
+
+
+@app.get("/api/integrations")
+async def api_integrations() -> list[dict]:
+    result = []
+    for key, spec in _INTEGRATIONS.items():
+        entry = {"key": key, "name": spec["name"], "purpose": spec["purpose"],
+                 "env": spec["env"], "configured": spec["configured"]()}
+        if key == "servicenow":
+            entry["mode"] = snow.mode()
+        result.append(entry)
+    return result
+
+
+def _test_integration(key: str) -> None:
+    if key == "splunk":
+        splunk, _ = ctx.readers_from_env()
+        if splunk is None: raise RuntimeError("not configured")
+        ctx._get(f"{splunk.base_url}/services/server/info?output_mode=json", splunk.token, "Splunk")
+    elif key == "dynatrace":
+        _, dynatrace = ctx.readers_from_env()
+        if dynatrace is None: raise RuntimeError("not configured")
+        dynatrace.problems('type("SERVICE")', minutes=5)
+    elif key == "servicenow":
+        reader = snow.reader_from_env()
+        if reader is None: raise RuntimeError("not configured (read credentials missing)")
+        reader.test()
+    else:
+        raise RuntimeError("unknown integration")
+
+
+@app.post("/api/integrations/{key}/test")
+async def api_test_integration(key: str) -> dict:
+    if key not in _INTEGRATIONS:
+        raise HTTPException(status_code=404, detail="unknown integration")
+    try:
+        if key == "mq_mcp":
+            await MqAceMcpCollector().health()
+        else:
+            await asyncio.to_thread(_test_integration, key)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -210,6 +364,26 @@ async def ws_events(websocket: WebSocket) -> None:
             "title": DASHBOARD_TITLE,
             "watched_objects": enterprise_pipeline.watched_objects(),
             "collector": collector_health(),
+            # Full stage roster, so the dashboard shows every agent even before
+            # (or without) any agent event firing.
+            "pipeline": {
+                "ai_enabled": enterprise_pipeline.use_ai,
+                "minimum_ai_severity": enterprise_pipeline.minimum_ai_severity,
+                "kb_reuse_threshold": enterprise_pipeline.kb_reuse_threshold,
+                "stages": [
+                    {"name": "watcher", "label": "Collection & rules", "ai": False,
+                     "role": "Collects observations from every configured source and evaluates "
+                             "deterministic rules. Runs continuously and costs nothing."},
+                    {"name": "diagnostician", "label": "Diagnostician", "ai": True,
+                     "model": enterprise_pipeline.models.diagnostician,
+                     "role": "Investigates an eligible new incident with read-only tools and "
+                             "produces a root-cause hypothesis with confidence and severity."},
+                    {"name": "report_writer", "label": "Report writer", "ai": True,
+                     "model": enterprise_pipeline.models.report_writer,
+                     "role": "Turns the diagnosis into a ticket-ready incident report. "
+                             "Has no tools and takes no actions."},
+                ],
+            },
         }).to_dict())
         for event in bus.recent(50):
             await websocket.send_json(event.to_dict())
