@@ -43,7 +43,7 @@ async def collect_forever(pipeline: EnterprisePipeline):
     delay = watchlist.poll_interval_seconds
     while True:
         try:
-            await collect_once(pipeline=pipeline)
+            results = await collect_once(pipeline=pipeline)
         except Exception as exc:
             _health["consecutive_failures"] += 1
             _health["last_error"] = f"{type(exc).__name__}: {exc}"
@@ -52,9 +52,22 @@ async def collect_forever(pipeline: EnterprisePipeline):
             if _health["consecutive_failures"] >= watchlist.max_consecutive_failures_before_backoff:
                 delay = min(delay * watchlist.backoff_multiplier, watchlist.max_backoff_seconds)
         else:
-            if _health["status"] != "ok":
+            # Only a run of failures is something to recover from; the first
+            # cycle after startup would otherwise log "recovered after 0".
+            if _health["consecutive_failures"]:
                 logger.info("collection recovered after %d failure(s)", _health["consecutive_failures"])
-            _health.update(status="ok", consecutive_failures=0, last_error=None, last_success_ts=time.time())
+            if results:
+                _health.update(status="ok", consecutive_failures=0, last_error=None, last_success_ts=time.time())
+            else:
+                # The MCP call succeeded but yielded nothing to report — e.g. the
+                # server is up while the queue managers behind it are not. Calling
+                # this "ok" would recreate the silent failure this loop exists to
+                # prevent, so it is surfaced as its own state. No backoff: the
+                # endpoint is healthy, so the normal cadence is still correct.
+                if _health["status"] != "degraded":
+                    logger.warning("collection returned no readings — check queue manager connectivity")
+                _health.update(status="degraded", consecutive_failures=0,
+                               last_error="collection returned no readings", last_success_ts=time.time())
             delay = watchlist.poll_interval_seconds
         _health["next_attempt_in"] = delay
         bus.publish(Event("collector_status", collector_health()))

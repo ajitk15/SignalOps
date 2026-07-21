@@ -985,6 +985,8 @@
       const objects = payload.watched_objects || [];
       if (objects.length) {
         objects.forEach(o => renderTile(o.object_name, o.object_type, o.status, o.timestamp));
+      } else if (payload.collector && payload.collector.status === 'degraded') {
+        el('tiles').innerHTML = '<span class="empty">Collection is running but returned no readings — check that the queue managers behind the MCP server are reachable.</span>';
       } else {
         el('tiles').innerHTML = '<span class="empty">No readings yet — awaiting the first collection cycle.</span>';
       }
@@ -998,10 +1000,14 @@
       const node = el('collector');
       if (!collector) { node.textContent = ''; node.className = 'conn'; return; }
       const failing = collector.status === 'failing';
-      node.className = failing ? 'conn down' : 'conn live';
+      // "degraded" means the MCP endpoint answered but returned no readings —
+      // healthy plumbing, nothing behind it. Not ok, but not a failure either.
+      const degraded = collector.status === 'degraded';
+      node.className = failing || degraded ? 'conn down' : 'conn live';
       node.textContent = failing
         ? `collector failing (${collector.consecutive_failures}×, retry in ${collector.next_attempt_in}s)`
-        : collector.status === 'ok' ? 'collector ok' : 'collector starting…';
+        : degraded ? 'collector degraded — no readings returned'
+          : collector.status === 'ok' ? 'collector ok' : 'collector starting…';
       if (failing) {
         document.querySelectorAll('#tiles .tile .dot').forEach(dot => dot.className = 'dot unknown');
       }
