@@ -105,7 +105,10 @@ class RuleRequest(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     metric: str = Field(pattern=r"^[a-z0-9_]{1,64}$")
     condition: dict
-    severity: str = Field(pattern=r"^P[1-4]$")
+    # P1-P4 fixes the severity (AI cannot override it), "ai" delegates the
+    # decision to the Diagnostician, and omitting it falls back to P3.
+    severity: str | None = Field(default=None, pattern=r"^(P[1-4]|ai)$")
+    ai_provisional: str | None = Field(default=None, pattern=r"^P[1-4]$")
     message: str = Field(min_length=3, max_length=200)
     escalate: dict | None = None
 
@@ -124,50 +127,113 @@ def _write_custom_rules(rules: list[dict]) -> None:
         encoding="utf-8")
 
 
-@app.get("/api/rules")
-async def api_list_rules() -> dict:
-    builtin = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))["rules"]
-    templates = yaml.safe_load(RULE_TEMPLATES_PATH.read_text(encoding="utf-8"))["categories"] \
-        if RULE_TEMPLATES_PATH.exists() else []
-    return {"builtin": builtin, "custom": _load_custom_rules(), "templates": templates}
+def _builtin_rules() -> list[dict]:
+    return yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))["rules"]
 
 
-@app.post("/api/rules")
-async def api_create_rule(payload: RuleRequest) -> dict:
+def _apply_custom(custom: list[dict], previous: list[dict]) -> None:
+    """Persist and reload, rolling back if the engine rejects the result."""
+    _write_custom_rules(custom)
+    try:
+        enterprise_pipeline.reload_rules()
+    except Exception as exc:
+        _write_custom_rules(previous)
+        enterprise_pipeline.reload_rules()
+        raise HTTPException(status_code=422, detail=f"rule rejected by the engine: {exc}")
+
+
+def _rule_from(payload: RuleRequest) -> dict:
     condition_type = payload.condition.get("type")
     if condition_type not in _KNOWN_CONDITIONS:
         raise HTTPException(status_code=422, detail=f"condition.type must be one of {sorted(_KNOWN_CONDITIONS)}")
     if condition_type == "not_in" and not payload.condition.get("values"):
         raise HTTPException(status_code=422, detail="not_in requires a values list")
-    custom = _load_custom_rules()
-    builtin_ids = {r["id"] for r in yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))["rules"]}
-    if payload.id in builtin_ids or any(r["id"] == payload.id for r in custom):
-        raise HTTPException(status_code=409, detail="a rule with this id already exists")
     rule = {"id": payload.id, "when": {"metric": payload.metric},
-            "condition": payload.condition, "severity": payload.severity, "message": payload.message}
+            "condition": payload.condition, "message": payload.message}
+    if payload.severity:
+        rule["severity"] = payload.severity
+    if payload.severity == "ai" and payload.ai_provisional:
+        rule["ai_provisional"] = payload.ai_provisional
     if payload.escalate:
         rule["escalate"] = payload.escalate
-    custom.append(rule)
-    _write_custom_rules(custom)
-    try:
-        enterprise_pipeline.reload_rules()  # validates the file end-to-end
-    except Exception as exc:
-        custom.pop()
-        _write_custom_rules(custom)
-        enterprise_pipeline.reload_rules()
-        raise HTTPException(status_code=422, detail=f"rule rejected by the engine: {exc}")
+    return rule
+
+
+@app.get("/api/rules")
+async def api_list_rules() -> dict:
+    builtin = _builtin_rules()
+    custom = _load_custom_rules()
+    overrides = {rule["id"]: rule for rule in custom}
+    builtin_view = []
+    for rule in builtin:
+        override = overrides.get(rule["id"])
+        builtin_view.append({**(override or rule), "origin": "built-in",
+                             "overridden": override is not None and not override.get("disabled"),
+                             "disabled": bool(override and override.get("disabled"))})
+    builtin_ids = {rule["id"] for rule in builtin}
+    custom_view = [{**rule, "origin": "custom"} for rule in custom if rule["id"] not in builtin_ids]
+    templates = yaml.safe_load(RULE_TEMPLATES_PATH.read_text(encoding="utf-8"))["categories"] \
+        if RULE_TEMPLATES_PATH.exists() else []
+    return {"builtin": builtin_view, "custom": custom_view, "templates": templates}
+
+
+@app.post("/api/rules")
+async def api_create_rule(payload: RuleRequest) -> dict:
+    custom = _load_custom_rules()
+    if payload.id in {r["id"] for r in _builtin_rules()} or any(r["id"] == payload.id for r in custom):
+        raise HTTPException(status_code=409, detail="a rule with this id already exists")
+    rule = _rule_from(payload)
+    _apply_custom(custom + [rule], custom)
     return {"status": "created", "rule": rule}
+
+
+@app.put("/api/rules/{rule_id}")
+async def api_update_rule(rule_id: str, payload: RuleRequest) -> dict:
+    """Edit a custom rule, or override a built-in one.
+
+    Overriding writes the edited copy into rules.custom.yaml; the engine
+    substitutes it for the shipped rule in place, so evaluation order — which
+    is behaviour under first-match-wins — never shifts. The shipped file is
+    left untouched, so reset restores it exactly.
+    """
+    if rule_id != payload.id:
+        raise HTTPException(status_code=422, detail="rule id in the path and body must match")
+    custom = _load_custom_rules()
+    is_builtin = rule_id in {r["id"] for r in _builtin_rules()}
+    if not is_builtin and not any(r["id"] == rule_id for r in custom):
+        raise HTTPException(status_code=404, detail="rule not found")
+    rule = _rule_from(payload)
+    updated = [r for r in custom if r["id"] != rule_id] + [rule]
+    _apply_custom(updated, custom)
+    return {"status": "updated", "rule": rule, "overrides_builtin": is_builtin}
 
 
 @app.delete("/api/rules/{rule_id}")
 async def api_delete_rule(rule_id: str) -> dict:
+    """Remove a custom rule, or disable a built-in one (reversible via reset)."""
+    custom = _load_custom_rules()
+    if rule_id in {r["id"] for r in _builtin_rules()}:
+        updated = [r for r in custom if r["id"] != rule_id] + [{"id": rule_id, "disabled": True}]
+        _apply_custom(updated, custom)
+        return {"status": "disabled", "id": rule_id}
+    remaining = [r for r in custom if r["id"] != rule_id]
+    if len(remaining) == len(custom):
+        raise HTTPException(status_code=404, detail="rule not found")
+    _apply_custom(remaining, custom)
+    return {"status": "deleted", "id": rule_id}
+
+
+@app.post("/api/rules/{rule_id}/reset")
+async def api_reset_rule(rule_id: str) -> dict:
+    """Drop any override/disable for a built-in rule, restoring the shipped one."""
+    if rule_id not in {r["id"] for r in _builtin_rules()}:
+        raise HTTPException(status_code=404, detail="only built-in rules can be reset")
     custom = _load_custom_rules()
     remaining = [r for r in custom if r["id"] != rule_id]
     if len(remaining) == len(custom):
-        raise HTTPException(status_code=404, detail="custom rule not found (built-in rules are file-managed)")
-    _write_custom_rules(remaining)
-    enterprise_pipeline.reload_rules()
-    return {"status": "deleted", "id": rule_id}
+        return {"status": "unchanged", "id": rule_id}
+    _apply_custom(remaining, custom)
+    return {"status": "reset", "id": rule_id}
 
 
 @app.get("/api/incidents/{incident_id}")

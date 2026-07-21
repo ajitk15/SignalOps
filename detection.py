@@ -31,6 +31,13 @@ class Observation:
     threshold: float | None = None
 
 
+DEFAULT_SEVERITY = "P3"
+# A rule may set severity to a fixed P1-P4, omit it (default), or delegate to
+# the AI. AI mode needs a provisional severity because severity is what decides
+# whether AI runs at all — see AI_SEVERITY_MODE below.
+AI_SEVERITY_MODE = "ai"
+
+
 @dataclass
 class Finding:
     fingerprint: str
@@ -38,6 +45,31 @@ class Finding:
     reason: str
     observation: Observation
     evidence: list[str]
+    # "rule"    — operator set an explicit severity; AI must not override it.
+    # "default" — nothing configured, fell back to DEFAULT_SEVERITY.
+    # "ai"      — provisional only; the AI's verdict replaces it when it runs.
+    severity_source: str = "rule"
+
+
+def merge_rules(builtin: list[dict], custom: list[dict]) -> list[dict]:
+    """Combine shipped rules with the UI-managed ones.
+
+    A custom entry sharing a built-in's id REPLACES it in place, so editing a
+    shipped rule cannot silently reorder evaluation (order is behaviour under
+    first-match-wins). `disabled: true` removes a rule. Genuinely new custom
+    rules append after the built-ins, where they can add detections without
+    shadowing shipped behaviour.
+    """
+    overrides = {rule["id"]: rule for rule in custom}
+    merged = []
+    for rule in builtin:
+        override = overrides.pop(rule["id"], None)
+        if override is None:
+            merged.append(rule)
+        elif not override.get("disabled"):
+            merged.append(override)
+    merged.extend(rule for rule in overrides.values() if not rule.get("disabled"))
+    return merged
 
 
 class RuleEngine:
@@ -57,9 +89,11 @@ class RuleEngine:
         # Settings referenced from rules.yaml via "${name}" placeholders.
         self.settings = {"default_depth_threshold": default_depth_threshold}
         self.trend_points = trend_points
-        self.rules = yaml.safe_load((rules_path or RULES_PATH).read_text(encoding="utf-8"))["rules"]
+        builtin = yaml.safe_load((rules_path or RULES_PATH).read_text(encoding="utf-8"))["rules"]
+        custom = []
         if rules_path is None and CUSTOM_RULES_PATH.exists():
-            self.rules = self.rules + (yaml.safe_load(CUSTOM_RULES_PATH.read_text(encoding="utf-8")) or {}).get("rules", [])
+            custom = (yaml.safe_load(CUSTOM_RULES_PATH.read_text(encoding="utf-8")) or {}).get("rules", [])
+        self.rules = merge_rules(builtin, custom)
         self._history: dict[str, list[float]] = {}
         # Metrics with at least one `rising` rule need history for every
         # observation, whichever rule ends up firing.
@@ -80,7 +114,7 @@ class RuleEngine:
             context = self._check_condition(rule["condition"], obs, history)
             if context is None:
                 continue  # condition false — fall through, as the elif chain did
-            severity = rule["severity"]
+            severity, source = self._severity_for(rule)
             escalate = rule.get("escalate")
             if escalate and context.get("threshold") is not None \
                     and float(obs.value) >= context["threshold"] * escalate["at_factor"]:
@@ -88,8 +122,25 @@ class RuleEngine:
             reason = rule["message"].format(**context)
             service = obs.labels.get("service", obs.object_name)
             fingerprint = f"{obs.labels.get('environment', 'unknown')}:{service}:{obs.metric}"
-            return Finding(fingerprint, severity, reason, obs, [reason])
+            return Finding(fingerprint, severity, reason, obs, [reason], severity_source=source)
         return None
+
+    @staticmethod
+    def _severity_for(rule: dict) -> tuple[str, str]:
+        """Resolve a rule's severity and where it came from.
+
+        AI mode is deliberately given a concrete provisional severity rather
+        than nothing: severity is the input to the AI cost gate, so a rule that
+        wants AI to decide must still be rankable before AI has run. It also
+        means an AI-mode rule degrades to a sensible fixed severity when
+        ENABLE_INCIDENT_AI is off, instead of failing.
+        """
+        configured = rule.get("severity")
+        if configured is None:
+            return DEFAULT_SEVERITY, "default"
+        if str(configured).lower() == AI_SEVERITY_MODE:
+            return rule.get("ai_provisional", DEFAULT_SEVERITY), "ai"
+        return configured, "rule"
 
     # -- state -----------------------------------------------------------------
 

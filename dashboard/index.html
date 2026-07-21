@@ -1027,11 +1027,13 @@
     <p id="kb-draft-status" class="dialog-note"></p>
   </dialog>
   <dialog id="rule-dialog"><button class="dialog-close" onclick="el('rule-dialog').close()">Close</button>
-    <h3>Add detection rule</h3>
+    <h3 id="rule-dialog-title">Add detection rule</h3>
     <p class="dialog-note">Start from a product template or build from scratch. The rule takes effect
       immediately for future observations.</p>
-    <label>Template</label>
-    <select id="rule-template" class="draft-field" onchange="applyRuleTemplate()"></select>
+    <div id="rule-template-row">
+      <label>Template</label>
+      <select id="rule-template" class="draft-field" onchange="applyRuleTemplate()"></select>
+    </div>
     <label>Rule id</label><input id="rule-id" class="draft-field" placeholder="lowercase-with-dashes" />
     <label>Metric</label><input id="rule-metric" class="draft-field" placeholder="e.g. proxy_latency_ms" />
     <label>Condition</label>
@@ -1043,12 +1045,23 @@
     <label>Threshold / healthy values (comma-separated for not_in)</label>
     <input id="rule-value" class="draft-field" placeholder="e.g. 1000   or   RUNNING, STARTED" />
     <label>Severity</label>
-    <select id="rule-severity" class="draft-field">
-      <option>P1</option><option selected>P2</option><option>P3</option><option>P4</option>
+    <select id="rule-severity" class="draft-field" onchange="toggleProvisional()">
+      <option value="">Default (P3) — AI may refine it when it runs</option>
+      <option value="ai">Decided by AI — the Diagnostician sets it</option>
+      <option value="P1">P1 — fixed</option>
+      <option value="P2" selected>P2 — fixed</option>
+      <option value="P3">P3 — fixed</option>
+      <option value="P4">P4 — fixed</option>
     </select>
+    <div id="provisional-row" class="hidden">
+      <label>Provisional severity (used to decide whether AI runs at all)</label>
+      <select id="rule-provisional" class="draft-field">
+        <option>P1</option><option>P2</option><option selected>P3</option><option>P4</option>
+      </select>
+    </div>
     <label>Message</label><input id="rule-message" class="draft-field"
       placeholder="e.g. Proxy latency {value} ms exceeds {threshold} ms" />
-    <p><button class="button" onclick="saveRule()">Create rule</button></p>
+    <p><button id="rule-save" class="button" onclick="saveRule()">Create rule</button></p>
     <p id="rule-status" class="dialog-note"></p>
   </dialog>
   <dialog id="kb-editor-dialog"><button class="dialog-close" onclick="el('kb-editor-dialog').close()">Close</button>
@@ -1541,40 +1554,103 @@
       return c.type || '';
     }
 
+    // Severity may be fixed, AI-decided, or unset (defaults to P3).
+    function severityBadge(rule) {
+      if (rule.severity === 'ai') {
+        const provisional = rule.ai_provisional || 'P3';
+        return `<span class="sev sev-${esc(provisional)}">AI · from ${esc(provisional)}</span>`;
+      }
+      const severity = rule.severity || 'P3';
+      return `<span class="sev sev-${esc(severity)}">${esc(severity)}${rule.severity ? '' : ' · default'}</span>`;
+    }
+
     async function loadRules() {
       const container = el('rules-list');
       try {
         const data = await (await fetch('/api/rules')).json();
         ruleTemplates = data.templates || [];
         container.replaceChildren();
-        for (const [kind, rules] of [['built-in', data.builtin], ['custom', data.custom]]) {
-          for (const rule of rules) {
-            const row = document.createElement('div'); row.className = 'kb-library-row';
-            const info = document.createElement('div');
-            info.innerHTML = `<h3>${esc(rule.id)} <span class="sev sev-${esc(rule.severity)}">${esc(rule.severity)}</span>
-              <span class="trigger-badge trigger-poll">${kind}</span></h3>
-              <p>${esc(ruleSummary(rule))} — “${esc(rule.message)}”</p>`;
-            const actions = document.createElement('div'); actions.className = 'row-actions';
-            if (kind === 'custom') {
-              const remove = document.createElement('button');
-              remove.className = 'button danger'; remove.textContent = 'Delete';
-              remove.onclick = () => deleteRule(rule.id);
-              actions.appendChild(remove);
-            }
-            row.append(info, actions); container.appendChild(row);
+        for (const rule of [...data.builtin, ...data.custom]) {
+          const builtin = rule.origin === 'built-in';
+          const row = document.createElement('div'); row.className = 'kb-library-row';
+          if (rule.disabled) row.style.opacity = '.55';
+          const info = document.createElement('div');
+          info.innerHTML = `<h3>${esc(rule.id)} ${rule.disabled ? '' : severityBadge(rule)}
+            <span class="trigger-badge trigger-poll">${esc(rule.origin)}</span>
+            ${rule.overridden ? '<span class="trigger-badge trigger-event">modified</span>' : ''}
+            ${rule.disabled ? '<span class="trigger-badge trigger-poll">disabled</span>' : ''}</h3>
+            <p>${rule.disabled ? 'Disabled — not evaluated.' : esc(ruleSummary(rule)) + ' — “' + esc(rule.message) + '”'}</p>`;
+          const actions = document.createElement('div'); actions.className = 'row-actions';
+          if (!rule.disabled) {
+            const edit = document.createElement('button');
+            edit.className = 'button'; edit.textContent = 'Modify';
+            edit.onclick = () => openRuleDialog(rule);
+            actions.appendChild(edit);
           }
+          // Built-ins are disabled rather than deleted, and reset restores the
+          // shipped definition exactly — the file on disk is never rewritten.
+          if (builtin && (rule.overridden || rule.disabled)) {
+            const reset = document.createElement('button');
+            reset.className = 'button'; reset.textContent = 'Reset';
+            reset.onclick = () => resetRule(rule.id);
+            actions.appendChild(reset);
+          }
+          if (!rule.disabled) {
+            const remove = document.createElement('button');
+            remove.className = 'button danger'; remove.textContent = builtin ? 'Disable' : 'Delete';
+            remove.onclick = () => deleteRule(rule.id, builtin);
+            actions.appendChild(remove);
+          }
+          row.append(info, actions); container.appendChild(row);
         }
         if (!container.children.length) container.innerHTML = '<span class="empty">No rules configured.</span>';
       } catch { container.innerHTML = '<span class="empty">Rules could not be loaded.</span>'; }
     }
 
-    function openRuleDialog() {
+    let editingRuleId = null;
+
+    function toggleProvisional() {
+      el('provisional-row').classList.toggle('hidden', el('rule-severity').value !== 'ai');
+    }
+
+    function openRuleDialog(rule = null) {
+      editingRuleId = rule ? rule.id : null;
       const select = el('rule-template');
       select.innerHTML = '<option value="">— from scratch —</option>' + ruleTemplates.map((category, ci) =>
         `<optgroup label="${esc(category.name)}">` + category.templates.map((tpl, ti) =>
           `<option value="${ci}:${ti}">${esc(tpl.product)} — ${esc(tpl.label)}</option>`).join('') + '</optgroup>').join('');
-      el('rule-status').textContent = '';
+      el('rule-dialog-title').textContent = rule ? `Modify rule: ${rule.id}` : 'Add detection rule';
+      el('rule-save').textContent = rule ? 'Save changes' : 'Create rule';
+      // The id is the identity of an override — changing it would orphan the
+      // edit and resurrect the original built-in.
+      el('rule-id').readOnly = Boolean(rule);
+      el('rule-template-row').classList.toggle('hidden', Boolean(rule));
+      if (rule) {
+        el('rule-id').value = rule.id;
+        el('rule-metric').value = rule.when?.metric ?? '';
+        el('rule-condition').value = rule.condition?.type ?? 'greater_than';
+        el('rule-value').value = rule.condition?.type === 'not_in'
+          ? (rule.condition.values || []).join(', ')
+          : (rule.condition?.default ?? rule.condition?.value ?? '');
+        el('rule-severity').value = rule.severity ?? '';
+        el('rule-provisional').value = rule.ai_provisional ?? 'P3';
+        el('rule-message').value = rule.message ?? '';
+        el('rule-status').textContent = rule.origin === 'built-in'
+          ? 'Editing a built-in rule saves an override; Reset restores the shipped version.' : '';
+      } else {
+        ['rule-id', 'rule-metric', 'rule-value', 'rule-message'].forEach(id => el(id).value = '');
+        el('rule-severity').value = 'P2';
+        el('rule-status').textContent = '';
+      }
+      toggleProvisional();
       el('rule-dialog').showModal();
+    }
+
+    async function resetRule(id) {
+      if (!confirm(`Reset "${id}" to its shipped definition?`)) return;
+      const response = await fetch(`/api/rules/${id}/reset`, { method: 'POST' });
+      if (!response.ok) { toast('Reset failed'); return; }
+      loadRules();
     }
 
     function applyRuleTemplate() {
@@ -1603,25 +1679,33 @@
       } else if (type === 'not_in') {
         condition.values = rawValue.split(',').map(v => v.trim()).filter(Boolean);
       }
+      const severity = el('rule-severity').value;
+      const body = { id: el('rule-id').value.trim(), metric: el('rule-metric').value.trim(),
+        condition, message: el('rule-message').value.trim() };
+      if (severity) body.severity = severity;
+      if (severity === 'ai') body.ai_provisional = el('rule-provisional').value;
       const status = el('rule-status');
-      status.textContent = 'Creating…';
+      status.textContent = editingRuleId ? 'Saving…' : 'Creating…';
       try {
-        const response = await fetch('/api/rules', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: el('rule-id').value.trim(), metric: el('rule-metric').value.trim(),
-            condition, severity: el('rule-severity').value, message: el('rule-message').value.trim() })
+        const response = await fetch(editingRuleId ? `/api/rules/${editingRuleId}` : '/api/rules', {
+          method: editingRuleId ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.detail?.[0]?.msg || result.detail || 'creation failed');
-        status.textContent = 'Rule created — active for future observations (trend history resets).';
+        if (!response.ok) throw new Error(result.detail?.[0]?.msg || result.detail || 'save failed');
+        status.textContent = (editingRuleId ? 'Rule saved' : 'Rule created')
+          + ' — active for future observations (trend history resets).';
         loadRules();
       } catch (error) { status.textContent = String(error.message); }
     }
 
-    async function deleteRule(id) {
-      if (!confirm(`Delete custom rule "${id}"?`)) return;
+    async function deleteRule(id, builtin) {
+      const message = builtin
+        ? `Disable built-in rule "${id}"? It stops being evaluated; Reset restores it.`
+        : `Delete custom rule "${id}"?`;
+      if (!confirm(message)) return;
       const response = await fetch(`/api/rules/${id}`, { method: 'DELETE' });
-      if (!response.ok) { toast('Delete failed'); return; }
+      if (!response.ok) { toast(builtin ? 'Disable failed' : 'Delete failed'); return; }
       loadRules();
     }
 
