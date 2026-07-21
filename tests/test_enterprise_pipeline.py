@@ -8,7 +8,8 @@ from unittest.mock import patch
 import collector_loop
 from agents.common import Watchlist
 from collector_loop import collect_forever, collector_health
-from detection import Correlator, Observation, RuleEngine
+import store
+from detection import Correlator, Finding, Observation, RuleEngine
 from enterprise_pipeline import EnterprisePipeline
 from events import bus
 from integrations.mq_ace_mcp import _queue_readings, _split_multi
@@ -257,6 +258,74 @@ class ServiceNowOutboxTests(unittest.TestCase):
         from integrations import servicenow
         with patch.dict("os.environ", {"SERVICENOW_MODE": "off"}):
             asyncio.run(servicenow.deliver_forever())  # returns immediately
+
+
+class SeverityModeTests(unittest.TestCase):
+    """Severity is either fixed by the operator, defaulted, or delegated to AI."""
+
+    def _finding(self, rule: dict):
+        import detection
+        engine = RuleEngine.__new__(RuleEngine)
+        engine.settings = {"default_depth_threshold": 1000}
+        engine.trend_points = 3
+        engine.rules = [rule]
+        engine._history = {}
+        engine._stateful_metrics = set()
+        return engine.evaluate(Observation("s", "queue", "Q", "queue_depth", 50, threshold=10))
+
+    def test_fixed_severity_is_marked_as_operator_owned(self):
+        finding = self._finding({"id": "r", "when": {"metric": "queue_depth"},
+                                 "condition": {"type": "greater_than", "value": "${threshold}"},
+                                 "severity": "P1", "message": "over"})
+        self.assertEqual((finding.severity, finding.severity_source), ("P1", "rule"))
+
+    def test_missing_severity_falls_back_to_p3(self):
+        finding = self._finding({"id": "r", "when": {"metric": "queue_depth"},
+                                 "condition": {"type": "greater_than", "value": "${threshold}"},
+                                 "message": "over"})
+        self.assertEqual((finding.severity, finding.severity_source), ("P3", "default"))
+
+    def test_ai_mode_carries_a_provisional_severity(self):
+        """AI mode must still be rankable before AI runs — severity is the input
+        to the cost gate that decides whether AI runs at all."""
+        finding = self._finding({"id": "r", "when": {"metric": "queue_depth"},
+                                 "condition": {"type": "greater_than", "value": "${threshold}"},
+                                 "severity": "ai", "message": "over"})
+        self.assertEqual((finding.severity, finding.severity_source), ("P3", "ai"))
+        custom = self._finding({"id": "r", "when": {"metric": "queue_depth"},
+                                "condition": {"type": "greater_than", "value": "${threshold}"},
+                                "severity": "ai", "ai_provisional": "P2", "message": "over"})
+        self.assertEqual((custom.severity, custom.severity_source), ("P2", "ai"))
+
+    def test_ai_cannot_override_an_operator_set_severity(self):
+        """The regression this guards: _save used to take the AI's severity
+        unconditionally, silently downgrading a deliberate P1."""
+        pipeline = EnterprisePipeline(use_ai=False)
+        obs = Observation("s", "queue", "Q", "queue_depth", 50, threshold=10)
+        fixed = Finding("fp", "P1", "reason", obs, ["reason"], severity_source="rule")
+        provisional = Finding("fp2", "P3", "reason", obs, ["reason"], severity_source="ai")
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("store.DB_PATH", Path(temp) / "incidents.db"):
+                pipeline._save(fixed, {}, {"severity": "P4"}, 0.0, {}, "ai")
+                pipeline._save(provisional, {}, {"severity": "P1"}, 0.0, {}, "ai")
+                stored = {row["title"]: row["severity"] for row in store.list_incidents()}
+        # Operator's P1 survives an AI verdict of P4; the provisional P3 defers.
+        self.assertEqual(set(stored.values()), {"P1"})
+
+
+class RuleOverrideTests(unittest.TestCase):
+    def test_override_replaces_builtin_in_place(self):
+        from detection import merge_rules
+        builtin = [{"id": "a", "severity": "P1"}, {"id": "b", "severity": "P2"}]
+        merged = merge_rules(builtin, [{"id": "b", "severity": "P4"}, {"id": "c", "severity": "P3"}])
+        # Order is behaviour under first-match-wins: the override must not move.
+        self.assertEqual([r["id"] for r in merged], ["a", "b", "c"])
+        self.assertEqual(merged[1]["severity"], "P4")
+
+    def test_disabled_builtin_is_removed(self):
+        from detection import merge_rules
+        merged = merge_rules([{"id": "a"}, {"id": "b"}], [{"id": "a", "disabled": True}])
+        self.assertEqual([r["id"] for r in merged], ["b"])
 
 
 class ServiceNowKbDeliveryTests(unittest.TestCase):

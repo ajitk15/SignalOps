@@ -150,7 +150,11 @@ class EnterprisePipeline:
 
     def _save(self, finding, diagnosis, report, cost, context, route):
         snapshot = asdict(finding.observation) | {"reason": finding.reason, "fingerprint": finding.fingerprint, "context": context}
-        severity = report.get("severity", finding.severity)
+        # An explicitly configured severity is the operator's decision and the
+        # AI must not quietly downgrade it. Only "default" and "ai" severities
+        # are provisional, so only those defer to the AI's verdict.
+        severity = finding.severity if finding.severity_source == "rule" \
+            else report.get("severity", finding.severity)
         title = report.get("title", finding.reason)
         created_at = time.time()
         incident_id = store.save_incident(object_name=finding.observation.object_name, object_type=finding.observation.object_type,
@@ -165,6 +169,7 @@ class EnterprisePipeline:
                                                "total_cost_usd": cost, "severity": severity,
                                                "object_name": finding.observation.object_name,
                                                "object_type": finding.observation.object_type,
+                                               "severity_source": finding.severity_source,
                                                "trigger_source": finding.observation.source,
                                                "created_at": created_at}))
         return incident_id
