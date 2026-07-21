@@ -1,0 +1,131 @@
+# Rule template catalog: what to monitor per product, grouped by the common
+# monitoring categories that recur across middleware and app platforms.
+# Every template maps onto the engine's existing condition types
+# (greater_than [+ escalate], not_in, rising) — no engine changes needed.
+#
+# The metric names are the vocabulary contract: whatever collector you point
+# at a product must emit these metric names for the template rules to match.
+
+categories:
+  - name: Availability / status
+    description: The component is not in a healthy running state.
+    templates:
+      - product: IBM MQ
+        label: Channel not running
+        rule: {metric: channel_status, condition: {type: not_in, values: [RUNNING, INACTIVE]},
+               severity: P2, message: "Channel status is {value_text}"}
+      - product: IBM ACE
+        label: Flow not running
+        rule: {metric: ace_flow_status, condition: {type: not_in, values: [RUNNING, STARTED]},
+               severity: P2, message: "ACE flow status is {value_text}"}
+      - product: Apigee
+        label: Proxy not deployed/up
+        rule: {metric: proxy_status, condition: {type: not_in, values: [UP, DEPLOYED]},
+               severity: P2, message: "API proxy status is {value_text}"}
+      - product: DataPower
+        label: Object down
+        rule: {metric: object_status, condition: {type: not_in, values: [UP, ENABLED]},
+               severity: P2, message: "DataPower object status is {value_text}"}
+      - product: Java / JVM
+        label: App health check failing
+        rule: {metric: app_health, condition: {type: not_in, values: [UP, HEALTHY, OK]},
+               severity: P2, message: "Application health is {value_text}"}
+
+  - name: Backlog / depth
+    description: Work is piling up faster than it drains.
+    templates:
+      - product: IBM MQ
+        label: Queue depth over threshold
+        rule: {metric: queue_depth, condition: {type: greater_than, value: "${threshold}", default: 1000},
+               severity: P3, escalate: {at_factor: 2, severity: P2},
+               message: "Queue depth {value_int} exceeds threshold {threshold_int}"}
+      - product: IBM ACE
+        label: Flow input backlog
+        rule: {metric: queue_backlog, condition: {type: greater_than, value: "${threshold}", default: 500},
+               severity: P3, escalate: {at_factor: 2, severity: P2},
+               message: "Flow backlog {value_int} exceeds threshold {threshold_int}"}
+      - product: Apigee
+        label: Quota nearly exhausted
+        rule: {metric: quota_used_percent, condition: {type: greater_than, value: "${threshold}", default: 90},
+               severity: P3, message: "Quota usage {value_int}% exceeds {threshold_int}%"}
+      - product: DataPower
+        label: Pending transactions high
+        rule: {metric: pending_transactions, condition: {type: greater_than, value: "${threshold}", default: 100},
+               severity: P3, escalate: {at_factor: 2, severity: P2},
+               message: "Pending transactions {value_int} exceed threshold {threshold_int}"}
+      - product: Java / JVM
+        label: Internal queue growing
+        rule: {metric: queue_size, condition: {type: rising},
+               severity: P3, message: "Queue size is rising across {trend_points} observations: {history}"}
+
+  - name: Errors
+    description: Failures are occurring in the message / request path.
+    templates:
+      - product: IBM MQ
+        label: Errors present
+        rule: {metric: error_count, condition: {type: greater_than, value: "${threshold}", default: 0},
+               severity: P2, message: "{metric} is {value}"}
+      - product: IBM ACE
+        label: Flow exceptions
+        rule: {metric: exception_count, condition: {type: greater_than, value: "${threshold}", default: 0},
+               severity: P2, message: "{metric} is {value}"}
+      - product: Apigee
+        label: 5xx error rate high
+        rule: {metric: http_5xx_rate, condition: {type: greater_than, value: "${threshold}", default: 5},
+               severity: P2, message: "5xx rate {value}% exceeds {threshold}%"}
+      - product: DataPower
+        label: Error rate high
+        rule: {metric: error_rate, condition: {type: greater_than, value: "${threshold}", default: 5},
+               severity: P2, message: "Error rate {value}% exceeds {threshold}%"}
+      - product: Java / JVM
+        label: Unhandled exceptions
+        rule: {metric: exception_count, condition: {type: greater_than, value: "${threshold}", default: 0},
+               severity: P2, message: "{metric} is {value}"}
+
+  - name: Latency
+    description: Work completes, but too slowly.
+    templates:
+      - product: IBM MQ
+        label: Oldest message too old
+        rule: {metric: oldest_message_age_s, condition: {type: greater_than, value: "${threshold}", default: 300},
+               severity: P3, escalate: {at_factor: 2, severity: P2},
+               message: "Oldest message age {value_int}s exceeds {threshold_int}s"}
+      - product: IBM ACE
+        label: Flow latency high
+        rule: {metric: flow_latency_ms, condition: {type: greater_than, value: "${threshold}", default: 2000},
+               severity: P3, message: "Flow latency {value_int}ms exceeds {threshold_int}ms"}
+      - product: Apigee
+        label: Proxy latency high
+        rule: {metric: proxy_latency_ms, condition: {type: greater_than, value: "${threshold}", default: 1000},
+               severity: P3, escalate: {at_factor: 2, severity: P2},
+               message: "Proxy latency {value_int}ms exceeds {threshold_int}ms"}
+      - product: DataPower
+        label: Service latency high
+        rule: {metric: latency_ms, condition: {type: greater_than, value: "${threshold}", default: 1000},
+               severity: P3, message: "Latency {value_int}ms exceeds {threshold_int}ms"}
+      - product: Java / JVM
+        label: GC pause long
+        rule: {metric: gc_pause_ms, condition: {type: greater_than, value: "${threshold}", default: 500},
+               severity: P3, message: "GC pause {value_int}ms exceeds {threshold_int}ms"}
+
+  - name: Resources
+    description: The platform itself is running out of headroom.
+    templates:
+      - product: DataPower
+        label: CPU high
+        rule: {metric: cpu_percent, condition: {type: greater_than, value: "${threshold}", default: 85},
+               severity: P3, escalate: {at_factor: 1.1, severity: P2},
+               message: "CPU {value_int}% exceeds {threshold_int}%"}
+      - product: DataPower
+        label: Memory high
+        rule: {metric: memory_percent, condition: {type: greater_than, value: "${threshold}", default: 85},
+               severity: P3, message: "Memory {value_int}% exceeds {threshold_int}%"}
+      - product: Java / JVM
+        label: Heap high
+        rule: {metric: heap_used_percent, condition: {type: greater_than, value: "${threshold}", default: 85},
+               severity: P3, escalate: {at_factor: 1.1, severity: P2},
+               message: "Heap usage {value_int}% exceeds {threshold_int}%"}
+      - product: Java / JVM
+        label: Thread count rising
+        rule: {metric: thread_count, condition: {type: rising},
+               severity: P3, message: "Thread count is rising across {trend_points} observations: {history}"}

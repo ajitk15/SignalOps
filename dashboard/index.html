@@ -801,6 +801,98 @@
       opacity: 1;
     }
 
+    /* --- agent workflow ------------------------------------------------- */
+    .workflow {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .agent-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      width: 250px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .agent-card.running {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent) inset;
+    }
+
+    .agent-card.disabled {
+      opacity: .65;
+    }
+
+    .agent-card h3 {
+      margin: 0;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .agent-card .agent-model {
+      font: 600 11px ui-monospace, monospace;
+      color: var(--accent);
+    }
+
+    .agent-card .agent-role {
+      font-size: 12px;
+      color: var(--muted);
+      flex: 1;
+    }
+
+    .agent-card .agent-state {
+      font-size: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 7px;
+    }
+
+    .agent-card .agent-cost {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .flow-arrow {
+      align-self: center;
+      color: var(--muted);
+      font-size: 22px;
+      user-select: none;
+    }
+
+    .gate-card {
+      background: var(--panel-2);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      width: 230px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .gate-card h4 {
+      margin: 0 0 6px;
+      color: var(--text);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .gate-card ul {
+      margin: 0;
+      padding-left: 16px;
+    }
+
+    .gate-card .gate-on { color: var(--ok); }
+    .gate-card .gate-off { color: var(--bad); }
+
     .pipeline-note .dismiss {
       float: right;
       background: transparent;
@@ -818,7 +910,10 @@
     <h1 id="app-title">Incident Triage Pipeline</h1>
     <div class="header-actions">
       <div class="tabs"><button class="tab active" data-view="dashboard"
-          onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="kb"
+          onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="agents"
+          onclick="switchView('agents')">Agents</button><button class="tab" data-view="rules"
+          onclick="switchView('rules')">Rules</button><button class="tab" data-view="integrations"
+          onclick="switchView('integrations')">Integrations</button><button class="tab" data-view="kb"
           onclick="switchView('kb')">Knowledge base</button></div>
       <div id="health" class="health"><span id="conn" class="conn down">connecting…</span></div>
     </div>
@@ -856,6 +951,31 @@
     </section>
   </main>
   <div id="toast" role="status"></div>
+  <main id="agents-view" class="hidden">
+    <section>
+      <h2>Agent workflow</h2>
+      <p class="empty">Every stage of the pipeline, whether or not it has run yet. Collection and rules are
+        deterministic and free; the AI agents run only when the gate conditions all hold.</p>
+      <div id="workflow" class="workflow"><span class="empty">Waiting for the pipeline snapshot…</span></div>
+    </section>
+  </main>
+  <main id="rules-view" class="hidden">
+    <section>
+      <h2>Detection rules</h2>
+      <p class="empty">Built-in rules are file-managed and read-only here. Custom rules evaluate after
+        built-ins (first match wins), so they add detections without changing existing behaviour.</p>
+      <p><button class="button" onclick="openRuleDialog()">Add rule</button></p>
+      <div id="rules-list" class="kb-library"><span class="empty">Loading rules…</span></div>
+    </section>
+  </main>
+  <main id="integrations-view" class="hidden">
+    <section>
+      <h2>Integrations</h2>
+      <p class="empty">Credentials are configured via environment variables (.env) only — they are never
+        entered in the browser, stored in the database, or returned by the API.</p>
+      <div id="integrations-list" class="kb-library"><span class="empty">Loading integrations…</span></div>
+    </section>
+  </main>
   <main id="kb-view" class="hidden">
     <section>
       <h2>Approved knowledge-base articles</h2>
@@ -874,6 +994,31 @@
       placeholder="Your name or team" /><textarea id="kb-draft-content" class="draft-editor"></textarea>
     <p><button id="kb-approve-button" class="button">Approve & publish article</button></p>
     <p id="kb-draft-status" class="dialog-note"></p>
+  </dialog>
+  <dialog id="rule-dialog"><button class="dialog-close" onclick="el('rule-dialog').close()">Close</button>
+    <h3>Add detection rule</h3>
+    <p class="dialog-note">Start from a product template or build from scratch. The rule takes effect
+      immediately for future observations.</p>
+    <label>Template</label>
+    <select id="rule-template" class="draft-field" onchange="applyRuleTemplate()"></select>
+    <label>Rule id</label><input id="rule-id" class="draft-field" placeholder="lowercase-with-dashes" />
+    <label>Metric</label><input id="rule-metric" class="draft-field" placeholder="e.g. proxy_latency_ms" />
+    <label>Condition</label>
+    <select id="rule-condition" class="draft-field">
+      <option value="greater_than">greater_than — numeric value over a threshold</option>
+      <option value="not_in">not_in — status outside the healthy set</option>
+      <option value="rising">rising — value strictly rising across polls</option>
+    </select>
+    <label>Threshold / healthy values (comma-separated for not_in)</label>
+    <input id="rule-value" class="draft-field" placeholder="e.g. 1000   or   RUNNING, STARTED" />
+    <label>Severity</label>
+    <select id="rule-severity" class="draft-field">
+      <option>P1</option><option selected>P2</option><option>P3</option><option>P4</option>
+    </select>
+    <label>Message</label><input id="rule-message" class="draft-field"
+      placeholder="e.g. Proxy latency {value} ms exceeds {threshold} ms" />
+    <p><button class="button" onclick="saveRule()">Create rule</button></p>
+    <p id="rule-status" class="dialog-note"></p>
   </dialog>
   <dialog id="kb-editor-dialog"><button class="dialog-close" onclick="el('kb-editor-dialog').close()">Close</button>
     <h3 id="kb-editor-title">Edit KB article</h3><label>Edited by</label><input id="kb-edited-by" class="draft-field"
@@ -977,6 +1122,59 @@
         stage.node.querySelector('.stage-cost').textContent =
           `$${stage.cost.toFixed(5)} · ${stage.calls} calls` + (model ? ` · ${model}` : '');
       }
+      // Mirror onto the Agents-tab workflow card, if the roster rendered one.
+      const card = document.getElementById('wf-' + name);
+      if (card) {
+        card.classList.toggle('running', active);
+        card.querySelector('.agent-state').textContent = state;
+        card.querySelector('.agent-cost').textContent = `$${stage.cost.toFixed(5)} · ${stage.calls} calls`;
+      }
+    }
+
+    // --- Agents tab: the whole workflow, visible whether or not it has run ---
+    let pipelineInfo = null;
+
+    function renderWorkflow() {
+      if (!pipelineInfo) return;
+      const container = el('workflow');
+      container.replaceChildren();
+      const aiOn = pipelineInfo.ai_enabled;
+      pipelineInfo.stages.forEach((stage, index) => {
+        if (index > 0) {
+          const arrow = document.createElement('div');
+          arrow.className = 'flow-arrow';
+          arrow.textContent = '→';
+          container.appendChild(arrow);
+        }
+        // The cost gate sits between deterministic collection and the AI agents.
+        if (index === 1) {
+          const gate = document.createElement('div');
+          gate.className = 'gate-card';
+          gate.innerHTML = `<h4>AI gate — all must hold</h4><ul>
+            <li>New incident (not a duplicate within the dedup window)</li>
+            <li>Severity at least ${esc(pipelineInfo.minimum_ai_severity)}</li>
+            <li>No approved KB match ≥ ${Math.round(pipelineInfo.kb_reuse_threshold * 100)}%</li>
+            <li class="${aiOn ? 'gate-on' : 'gate-off'}">ENABLE_INCIDENT_AI is ${aiOn ? 'on ✓' : 'off ✗'}</li>
+          </ul>`;
+          container.appendChild(gate);
+          const arrow = document.createElement('div');
+          arrow.className = 'flow-arrow';
+          arrow.textContent = '→';
+          container.appendChild(arrow);
+        }
+        const card = document.createElement('div');
+        card.className = 'agent-card' + (stage.ai && !aiOn ? ' disabled' : '');
+        card.id = 'wf-' + stage.name;
+        const idleText = stage.ai
+          ? (aiOn ? 'idle — runs for eligible new incidents' : 'AI disabled — set ENABLE_INCIDENT_AI=true')
+          : 'waiting for collection';
+        card.innerHTML = `<h3>${esc(stage.label)}<span class="mode ${stage.ai ? 'ai' : 'rules'}">${stage.ai ? 'AI' : 'No AI'}</span></h3>
+          ${stage.model ? `<div class="agent-model">${esc(stage.model)}</div>` : ''}
+          <div class="agent-role">${esc(stage.role || '')}</div>
+          <div class="agent-state">${idleText}</div>
+          <div class="agent-cost">$0.00000 · 0 calls</div>`;
+        container.appendChild(card);
+      });
     }
 
     function prependIncident(evt, live = false) {
@@ -997,6 +1195,7 @@
       <span class="incident-id">#${esc(id)}</span>
       <span class="trigger-badge trigger-${esc(trigger)}">${trigger === 'event' ? '⚡ event' : 'poll'}</span>
       ${esc(evt.payload.title || evt.payload.object_name)}
+      ${evt.payload.external_refs?.servicenow?.number ? `<span class="trigger-badge trigger-event">SNOW ${esc(evt.payload.external_refs.servicenow.number)}</span>` : ''}
       <span class="incident-time">${relSpan(createdAt, 'Generated: ')}</span>
     </span>
     <span class="sev sev-${esc(severity)}">${esc(evt.payload.severity || '—')}</span>`;
@@ -1222,7 +1421,21 @@
       } else {
         el('tiles').innerHTML = '<span class="empty">No readings yet — the first collection cycle lands within one poll interval.</span>';
       }
-      stageChip('watcher');
+      // Seed every configured stage so agents are visible before any event.
+      if (payload.pipeline) {
+        pipelineInfo = payload.pipeline;
+        pipelineInfo.stages.forEach(stage => { STAGE_LABELS[stage.name] = stage.label; });
+        renderWorkflow();
+        pipelineInfo.stages.forEach(stage => {
+          stageChip(stage.name);
+          const idle = stage.ai
+            ? (pipelineInfo.ai_enabled ? 'idle — runs for eligible new incidents' : 'AI disabled')
+            : 'waiting for collection';
+          if (!stages[stage.name].calls) setStage(stage.name, idle);
+        });
+      } else {
+        stageChip('watcher');
+      }
       renderCollectorHealth(payload.collector);
     }
 
@@ -1262,11 +1475,141 @@
       health.appendChild(fragment);
     }
 
+    const VIEWS = ['dashboard', 'agents', 'rules', 'integrations', 'kb'];
     function switchView(view) {
-      el('dashboard-view').classList.toggle('hidden', view !== 'dashboard');
-      el('kb-view').classList.toggle('hidden', view !== 'kb');
+      VIEWS.forEach(name => el(name + '-view').classList.toggle('hidden', name !== view));
       document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
       if (view === 'kb') loadKbLibrary();
+      if (view === 'rules') loadRules();
+      if (view === 'integrations') loadIntegrations();
+    }
+
+    // --- Rules tab -----------------------------------------------------
+    let ruleTemplates = [];
+
+    function ruleSummary(rule) {
+      const c = rule.condition || {};
+      if (c.type === 'greater_than') return `${rule.when?.metric ?? ''} > ${c.value === '${threshold}' ? 'per-target threshold' : c.value}${rule.escalate ? ` (≥×${rule.escalate.at_factor} → ${rule.escalate.severity})` : ''}`;
+      if (c.type === 'not_in') return `${rule.when?.metric ?? ''} not in [${(c.values || []).join(', ')}]`;
+      if (c.type === 'rising') return `${rule.when?.metric ?? ''} strictly rising`;
+      return c.type || '';
+    }
+
+    async function loadRules() {
+      const container = el('rules-list');
+      try {
+        const data = await (await fetch('/api/rules')).json();
+        ruleTemplates = data.templates || [];
+        container.replaceChildren();
+        for (const [kind, rules] of [['built-in', data.builtin], ['custom', data.custom]]) {
+          for (const rule of rules) {
+            const row = document.createElement('div'); row.className = 'kb-library-row';
+            const info = document.createElement('div');
+            info.innerHTML = `<h3>${esc(rule.id)} <span class="sev sev-${esc(rule.severity)}">${esc(rule.severity)}</span>
+              <span class="trigger-badge trigger-poll">${kind}</span></h3>
+              <p>${esc(ruleSummary(rule))} — “${esc(rule.message)}”</p>`;
+            const actions = document.createElement('div'); actions.className = 'row-actions';
+            if (kind === 'custom') {
+              const remove = document.createElement('button');
+              remove.className = 'button danger'; remove.textContent = 'Delete';
+              remove.onclick = () => deleteRule(rule.id);
+              actions.appendChild(remove);
+            }
+            row.append(info, actions); container.appendChild(row);
+          }
+        }
+        if (!container.children.length) container.innerHTML = '<span class="empty">No rules configured.</span>';
+      } catch { container.innerHTML = '<span class="empty">Rules could not be loaded.</span>'; }
+    }
+
+    function openRuleDialog() {
+      const select = el('rule-template');
+      select.innerHTML = '<option value="">— from scratch —</option>' + ruleTemplates.map((category, ci) =>
+        `<optgroup label="${esc(category.name)}">` + category.templates.map((tpl, ti) =>
+          `<option value="${ci}:${ti}">${esc(tpl.product)} — ${esc(tpl.label)}</option>`).join('') + '</optgroup>').join('');
+      el('rule-status').textContent = '';
+      el('rule-dialog').showModal();
+    }
+
+    function applyRuleTemplate() {
+      const value = el('rule-template').value;
+      if (!value) return;
+      const [ci, ti] = value.split(':').map(Number);
+      const template = ruleTemplates[ci].templates[ti];
+      const rule = template.rule;
+      el('rule-id').value = `${template.product} ${template.label}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      el('rule-metric').value = rule.metric;
+      el('rule-condition').value = rule.condition.type;
+      el('rule-value').value = rule.condition.type === 'not_in' ? (rule.condition.values || []).join(', ')
+        : (rule.condition.default ?? rule.condition.value ?? '');
+      el('rule-severity').value = rule.severity;
+      el('rule-message').value = rule.message;
+    }
+
+    async function saveRule() {
+      const type = el('rule-condition').value;
+      const rawValue = el('rule-value').value.trim();
+      const condition = { type };
+      if (type === 'greater_than') {
+        // Per-target thresholds stay overridable; the entered number is the default.
+        condition.value = '${threshold}';
+        condition.default = Number(rawValue) || 0;
+      } else if (type === 'not_in') {
+        condition.values = rawValue.split(',').map(v => v.trim()).filter(Boolean);
+      }
+      const status = el('rule-status');
+      status.textContent = 'Creating…';
+      try {
+        const response = await fetch('/api/rules', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: el('rule-id').value.trim(), metric: el('rule-metric').value.trim(),
+            condition, severity: el('rule-severity').value, message: el('rule-message').value.trim() })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail?.[0]?.msg || result.detail || 'creation failed');
+        status.textContent = 'Rule created — active for future observations (trend history resets).';
+        loadRules();
+      } catch (error) { status.textContent = String(error.message); }
+    }
+
+    async function deleteRule(id) {
+      if (!confirm(`Delete custom rule "${id}"?`)) return;
+      const response = await fetch(`/api/rules/${id}`, { method: 'DELETE' });
+      if (!response.ok) { toast('Delete failed'); return; }
+      loadRules();
+    }
+
+    // --- Integrations tab ----------------------------------------------
+    async function loadIntegrations() {
+      const container = el('integrations-list');
+      try {
+        const integrations = await (await fetch('/api/integrations')).json();
+        container.replaceChildren();
+        for (const integration of integrations) {
+          const row = document.createElement('div'); row.className = 'kb-library-row';
+          const info = document.createElement('div');
+          const statusDot = integration.configured
+            ? '<span class="health-dot ok" style="margin-right:6px"></span>'
+            : '<span class="health-dot starting" style="margin-right:6px"></span>';
+          info.innerHTML = `<h3>${statusDot}${esc(integration.name)}
+              ${integration.mode ? `<span class="trigger-badge trigger-poll">${esc(integration.mode)}</span>` : ''}</h3>
+            <p>${esc(integration.purpose)}</p>
+            <p>${integration.configured ? 'Configured via environment.' : 'Not configured — set: '}
+              ${integration.env.map(v => `<code>${esc(v)}</code>`).join(' ')}</p>`;
+          const actions = document.createElement('div'); actions.className = 'row-actions';
+          const test = document.createElement('button');
+          test.className = 'button'; test.textContent = 'Test';
+          test.onclick = async () => {
+            test.disabled = true; test.textContent = 'Testing…';
+            try {
+              const result = await (await fetch(`/api/integrations/${integration.key}/test`, { method: 'POST' })).json();
+              toast(`${integration.name}: ${result.ok ? 'connection ok' : result.error}`);
+            } catch { toast(`${integration.name}: test failed`); }
+            test.disabled = false; test.textContent = 'Test';
+          };
+          actions.appendChild(test); row.append(info, actions); container.appendChild(row);
+        }
+      } catch { container.innerHTML = '<span class="empty">Integrations could not be loaded.</span>'; }
     }
 
     async function loadKbLibrary() {

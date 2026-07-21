@@ -196,4 +196,61 @@ class CollectorResilienceTests(unittest.TestCase):
         self.assertEqual(collector_health()["status"], "ok")
 
 
+class CustomRulesTests(unittest.TestCase):
+    def test_custom_rules_load_after_builtins(self):
+        import detection
+        custom = Path(detection.CUSTOM_RULES_PATH)
+        self.addCleanup(lambda: custom.unlink(missing_ok=True))
+        custom.write_text("rules:\n  - id: test-latency\n    when: {metric: proxy_latency_ms}\n"
+                          "    condition: {type: greater_than, value: '${threshold}', default: 1000}\n"
+                          "    severity: P3\n    message: 'Latency {value_int}ms exceeds {threshold_int}ms'\n",
+                          encoding="utf-8")
+        engine = RuleEngine()
+        # Custom rule fires for its own metric…
+        finding = engine.evaluate(Observation("apigee", "proxy", "orders-api", "proxy_latency_ms", 2500))
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding.reason, "Latency 2500ms exceeds 1000ms")
+        # …and built-ins keep priority: the last rule id must be the custom one.
+        self.assertEqual(engine.rules[-1]["id"], "test-latency")
+
+
+class ServiceNowOutboxTests(unittest.TestCase):
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+
+    def _seed_incident(self) -> int:
+        import store as store_module
+        return store_module.save_incident(
+            object_name="QM1/Q", object_type="queue", severity="P2", title="depth",
+            markdown_report="r", watcher_json={}, diagnosis_json={}, report_json={},
+            total_cost_usd=0.0, trigger_source="mq_mcp")
+
+    def test_dry_run_marks_each_incident_exactly_once(self):
+        import store as store_module
+        from integrations import servicenow
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("store.DB_PATH", Path(temp) / "incidents.db"):
+                incident_id = self._seed_incident()
+                self.assertEqual([i["id"] for i in store_module.incidents_missing_ref("servicenow")],
+                                 [incident_id])
+
+                async def one_sweep(seconds):
+                    raise _StopLoop  # first sleep ends the worker after one pass
+
+                with patch.dict("os.environ", {"SERVICENOW_MODE": "dry_run"}), \
+                        patch("asyncio.sleep", one_sweep):
+                    with self.assertRaises(_StopLoop):
+                        asyncio.run(servicenow.deliver_forever())
+                # Marked once; the outbox is now empty — one incident, one delivery.
+                self.assertEqual(store_module.incidents_missing_ref("servicenow"), [])
+                refs = store_module.list_incidents()[0]["external_refs"]
+                self.assertEqual(refs["servicenow"]["mode"], "dry_run")
+
+    def test_mode_off_disables_worker(self):
+        from integrations import servicenow
+        with patch.dict("os.environ", {"SERVICENOW_MODE": "off"}):
+            asyncio.run(servicenow.deliver_forever())  # returns immediately
+
+
 if __name__ == "__main__": unittest.main()
