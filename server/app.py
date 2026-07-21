@@ -28,7 +28,7 @@ from events import Event, bus  # noqa: E402
 from enterprise_pipeline import EnterprisePipeline  # noqa: E402
 from detection import Observation  # noqa: E402
 from knowledge.service import draft_from_incident, search as search_kb  # noqa: E402
-from collect_mq_ace import collect_forever, collector_health  # noqa: E402
+from collector_loop import collect_forever, collector_health  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 

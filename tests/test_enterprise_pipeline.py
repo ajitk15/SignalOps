@@ -5,8 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-import collect_mq_ace
-from collect_mq_ace import collect_forever, collector_health
+import collector_loop
+from agents.common import Watchlist
+from collector_loop import collect_forever, collector_health
 from detection import Correlator, Observation, RuleEngine
 from enterprise_pipeline import EnterprisePipeline
 from events import bus
@@ -88,64 +89,110 @@ class DashboardStateTests(unittest.TestCase):
         self.assertEqual(event.payload["created_at"], stored[1])
 
 
+_WATCHLIST = Watchlist(poll_interval_seconds=60, sources=[],
+                       max_consecutive_failures_before_backoff=3,
+                       backoff_multiplier=2, max_backoff_seconds=600)
+
+
+class _FakeCollector:
+    """Scripted collector: each cycle either raises or returns observations."""
+
+    def __init__(self, name: str, failures: int = 0, yields=None):
+        self.name = name
+        self.failures = failures
+        self.yields = yields
+        self.attempt_times: list[float] = []
+        self._calls = 0
+
+    async def collect(self):
+        self.attempt_times.append(collector_loop.time.time())
+        self._calls += 1
+        if self._calls <= self.failures:
+            raise RuntimeError(f"{self.name} unreachable")
+        if self.yields is not None:
+            return list(self.yields)
+        return [Observation(self.name, "queue", f"{self.name}/Q1", "queue_depth", 1, threshold=10)]
+
+
+class _Pipeline:
+    async def ingest(self, observation):
+        return {"outcome": "healthy", "ai_calls": 0}
+
+
 class CollectorResilienceTests(unittest.TestCase):
     def setUp(self):
-        collect_mq_ace._health.update(status="starting", consecutive_failures=0,
-                                      last_error=None, last_success_ts=None, next_attempt_in=None)
+        collector_loop._health.clear()
         # These tests fail collection on purpose; the resulting tracebacks are
         # correct behaviour but would bury the actual test results.
         logging.disable(logging.CRITICAL)
         self.addCleanup(logging.disable, logging.NOTSET)
 
-    def _run_cycles(self, failures: int, cycles: int, yields=None) -> list[float]:
-        """Drive collect_forever, failing the first N cycles, capturing each sleep."""
-        delays: list[float] = []
-        calls = {"n": 0}
+    def _run_ticks(self, collectors, ticks: int):
+        """Drive collect_forever on a fake clock that advances one poll
+        interval per tick, so backoff shows up as skipped attempts."""
+        clock = {"now": 0.0}
 
-        async def flaky(pipeline=None):
-            calls["n"] += 1
-            if calls["n"] <= failures:
-                raise RuntimeError("mcp unreachable")
-            return [{"outcome": "healthy"}] if yields is None else yields
-
-        async def capture_sleep(seconds):
-            delays.append(seconds)
-            if len(delays) >= cycles:
+        async def tick_sleep(seconds):
+            clock["now"] += seconds
+            if clock["now"] >= ticks * _WATCHLIST.poll_interval_seconds:
                 raise _StopLoop
 
-        with patch("collect_mq_ace.collect_once", flaky), patch("asyncio.sleep", capture_sleep):
+        with patch.object(collector_loop.time, "time", lambda: clock["now"]), \
+                patch("asyncio.sleep", tick_sleep):
             with self.assertRaises(_StopLoop):
-                asyncio.run(collect_forever(None))
-        return delays
+                asyncio.run(collect_forever(_Pipeline(), watchlist=_WATCHLIST,
+                                            collectors=collectors))
 
     def test_failures_back_off_after_threshold_then_reset_on_recovery(self):
-        # watchlist.yaml: poll 60s, threshold 3 failures, multiplier 2, cap 600s.
-        delays = self._run_cycles(failures=4, cycles=6)
-        self.assertEqual(delays, [60, 60, 120, 240, 60, 60])
+        # threshold 3, multiplier 2: attempts at 0,60,120 fail; backoff skips
+        # tick 180; attempt 240 fails; skips 300..420; attempt 480 succeeds;
+        # normal cadence resumes.
+        collector = _FakeCollector("mq", failures=4)
+        self._run_ticks([collector], ticks=10)
+        self.assertEqual(collector.attempt_times, [0, 60, 120, 240, 480, 540])
+        self.assertEqual(collector_health()["status"], "ok")
 
     def test_loop_survives_failure_and_reports_health(self):
-        self._run_cycles(failures=2, cycles=2)
+        self._run_ticks([_FakeCollector("mq", failures=99)], ticks=2)
         health = collector_health()
         self.assertEqual(health["status"], "failing")
         self.assertEqual(health["consecutive_failures"], 2)
-        self.assertIn("mcp unreachable", health["last_error"])
+        self.assertIn("mq unreachable", health["last_error"])
 
     def test_backoff_is_capped(self):
-        delays = self._run_cycles(failures=20, cycles=12)
-        self.assertEqual(max(delays), 600)
+        collector = _FakeCollector("mq", failures=99)
+        self._run_ticks([collector], ticks=40)
+        gaps = [b - a for a, b in zip(collector.attempt_times, collector.attempt_times[1:])]
+        self.assertEqual(max(gaps), _WATCHLIST.max_backoff_seconds)
+
+    def test_one_failing_collector_does_not_stop_the_others(self):
+        healthy = _FakeCollector("mq")
+        broken = _FakeCollector("prom", failures=99)
+        self._run_ticks([healthy, broken], ticks=6)
+        # The healthy collector keeps its full cadence while the broken one
+        # backs off independently.
+        self.assertEqual(healthy.attempt_times, [0, 60, 120, 180, 240, 300])
+        health = collector_health()
+        self.assertEqual(health["collectors"]["mq"]["status"], "ok")
+        self.assertEqual(health["collectors"]["prom"]["status"], "failing")
+        # Aggregate reflects the worst collector so the dashboard stays honest.
+        self.assertEqual(health["status"], "failing")
 
     def test_successful_cycle_with_no_readings_is_not_reported_as_ok(self):
-        """A reachable MCP server sitting in front of dead queue managers still
-        collects nothing; calling that "ok" is the silent failure this guards."""
-        delays = self._run_cycles(failures=0, cycles=2, yields=[])
+        """A reachable endpoint in front of dead backends still collects
+        nothing; calling that "ok" is the silent failure this guards."""
+        collector = _FakeCollector("mq", yields=[])
+        self._run_ticks([collector], ticks=2)
         self.assertEqual(collector_health()["status"], "degraded")
         # The endpoint is healthy, so the poll cadence must stay normal.
-        self.assertEqual(delays, [60, 60])
+        self.assertEqual(collector.attempt_times, [0, 60])
 
     def test_readings_restore_ok_from_degraded(self):
-        self._run_cycles(failures=0, cycles=1, yields=[])
+        collector = _FakeCollector("mq", yields=[])
+        self._run_ticks([collector], ticks=1)
         self.assertEqual(collector_health()["status"], "degraded")
-        self._run_cycles(failures=0, cycles=1)
+        collector.yields = None
+        self._run_ticks([collector], ticks=1)
         self.assertEqual(collector_health()["status"], "ok")
 
 
