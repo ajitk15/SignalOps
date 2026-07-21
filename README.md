@@ -11,10 +11,12 @@ collector kind (`mq_mcp`, `http_json`, `prometheus`, or your own class in
 managed from the dashboard's Rules tab (with templates for IBM MQ, IBM ACE,
 Apigee, DataPower and Java/JVM), and the Agents tab shows the full workflow —
 Collection → AI gate → Diagnostician → Report writer — whether or not AI is
-enabled. ServiceNow ticketing runs as a dry-run outbox by default
-(`SERVICENOW_MODE=live` to create real tickets); Splunk, Dynatrace and
-ServiceNow status live in the Integrations tab, with credentials configured
-via environment variables only.
+enabled. ServiceNow receives both **incidents** (one ticket per incident) and
+**approved KB articles** (created in Knowledge, updated when edited, retired
+when deleted) — running as a dry-run outbox by default, with
+`SERVICENOW_MODE=live` to write for real. Splunk, Dynatrace and ServiceNow
+status live in the Integrations tab, with credentials configured via
+environment variables only.
 
 ## Processing flow
 

@@ -3,8 +3,10 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>MQ Triage Pipeline</title>
+  <title>SignalOps</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1.5' y='1.5' width='29' height='29' rx='7' fill='%230b0e14' stroke='%235b8cff' stroke-width='2'/%3E%3Cpolyline points='7 21 11 21 13 16 17 24 20 10 22 15' fill='none' stroke='%235b8cff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24.5' cy='11' r='2.2' fill='%233ddc84'/%3E%3C/svg%3E" />
   <style>
     :root {
       --bg: #0b0e14;
@@ -53,6 +55,25 @@
     header h1 {
       font-size: 16px;
       margin: 0;
+      letter-spacing: -.01em;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .brand .logo {
+      width: 26px;
+      height: 26px;
+      flex: none;
+    }
+
+    /* "Signal" reads as text, "Ops" carries the accent — set in renderBrand()
+       so a configured title still renders sensibly. */
+    .brand h1 .ops {
+      color: var(--accent);
     }
 
     .header-actions {
@@ -907,7 +928,17 @@
 
 <body>
   <header>
-    <h1 id="app-title">Incident Triage Pipeline</h1>
+    <div class="brand">
+      <!-- Signal rising into a spark: raw signals become an insight. Inline so
+           there is no asset to fetch, and themed from the CSS variables. -->
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
+        <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round" />
+        <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
+      </svg>
+      <h1 id="app-title">SignalOps</h1>
+    </div>
     <div class="header-actions">
       <div class="tabs"><button class="tab active" data-view="dashboard"
           onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="agents"
@@ -1406,13 +1437,28 @@
       }
     }
 
+    // A two-tone wordmark when the title ends in "Ops", plain text otherwise —
+    // the title is configurable, so the styling must degrade gracefully.
+    function renderBrand(title) {
+      document.title = title;
+      const node = el('app-title');
+      const match = /^(.*?)(Ops)$/.exec(title);
+      if (match) {
+        node.replaceChildren(document.createTextNode(match[1]));
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        ops.textContent = match[2];
+        node.appendChild(ops);
+      } else {
+        node.textContent = title;
+      }
+    }
+    renderBrand('SignalOps');
+
     // The socket's opening frame carries current state, so the panel paints on
     // load rather than waiting a whole poll interval for the next event.
     function applySnapshot(payload) {
-      if (payload.title) {
-        el('app-title').textContent = payload.title;
-        document.title = payload.title;
-      }
+      if (payload.title) renderBrand(payload.title);
       const objects = payload.watched_objects || [];
       if (objects.length) {
         objects.forEach(o => renderTile(o.source, o.object_name, o.object_type, o.status, o.timestamp));
@@ -1622,6 +1668,13 @@
           const row = document.createElement('div'); row.className = 'kb-library-row';
           const info = document.createElement('div');
           const title = document.createElement('h3'); title.textContent = article.title;
+          if (article.servicenow) {
+            const badge = document.createElement('span');
+            badge.className = 'trigger-badge trigger-event';
+            badge.style.marginLeft = '8px';
+            badge.textContent = article.servicenow.number ? `SNOW ${article.servicenow.number}` : 'SNOW dry-run';
+            title.appendChild(badge);
+          }
           const updated = document.createElement('p'); updated.textContent = `Last updated: ${formatTime(article.updated_at)}`;
           info.append(title, updated);
           const actions = document.createElement('div'); actions.className = 'row-actions';

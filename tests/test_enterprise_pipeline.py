@@ -253,4 +253,69 @@ class ServiceNowOutboxTests(unittest.TestCase):
             asyncio.run(servicenow.deliver_forever())  # returns immediately
 
 
+class ServiceNowKbDeliveryTests(unittest.TestCase):
+    """Approved KB articles mirror into ServiceNow Knowledge. The local
+    approved KB stays the source of truth for incident matching."""
+
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        root = Path(self._temp.name)
+        self.kb_dir = root / "approved"
+        self.kb_dir.mkdir()
+        self.refs_path = root / "refs.json"
+        from integrations import servicenow
+        self.servicenow = servicenow
+        patcher = patch.multiple(servicenow, KB_DIR=self.kb_dir, KB_REFS_PATH=self.refs_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _article(self, slug: str, body: str) -> Path:
+        path = self.kb_dir / f"{slug}.md"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _sweep(self):
+        self.servicenow._sweep_kb("dry_run")
+        return self.servicenow.load_kb_refs()
+
+    def test_each_article_is_delivered_exactly_once(self):
+        self._article("queue-depth-runbook", "# Queue depth runbook\n\nSteps.\n")
+        refs = self._sweep()
+        self.assertIn("queue-depth-runbook", refs)
+        first_hash = refs["queue-depth-runbook"]["hash"]
+        # A second sweep with nothing changed must not re-deliver.
+        with patch.object(self.servicenow, "_save_kb_refs") as save:
+            self.servicenow._sweep_kb("dry_run")
+            save.assert_not_called()
+        self.assertEqual(self._sweep()["queue-depth-runbook"]["hash"], first_hash)
+
+    def test_edited_article_triggers_one_update(self):
+        path = self._article("channel-runbook", "# Channel runbook\n\nOriginal.\n")
+        original_hash = self._sweep()["channel-runbook"]["hash"]
+        path.write_text("# Channel runbook\n\nRevised after review.\n", encoding="utf-8")
+        updated_hash = self._sweep()["channel-runbook"]["hash"]
+        self.assertNotEqual(original_hash, updated_hash)
+        # And settles: no further delivery once the hash is recorded.
+        with patch.object(self.servicenow, "_save_kb_refs") as save:
+            self.servicenow._sweep_kb("dry_run")
+            save.assert_not_called()
+
+    def test_deleted_article_is_retired_and_ref_dropped(self):
+        path = self._article("temporary-note", "# Temporary note\n\nBody.\n")
+        self.assertIn("temporary-note", self._sweep())
+        path.unlink()
+        self.assertNotIn("temporary-note", self._sweep())
+
+    def test_payload_uses_heading_as_title(self):
+        payload = self.servicenow.kb_payload("some-slug", "# Real Title\n\nBody.\n")
+        self.assertEqual(payload["short_description"], "Real Title")
+        self.assertEqual(payload["workflow_state"], "published")
+        # No heading -> fall back to the slug rather than sending an empty title.
+        self.assertEqual(self.servicenow.kb_payload("some-slug", "no heading")["short_description"],
+                         "some-slug")
+
+
 if __name__ == "__main__": unittest.main()
