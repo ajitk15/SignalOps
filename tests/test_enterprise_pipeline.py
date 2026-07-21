@@ -199,8 +199,14 @@ class CollectorResilienceTests(unittest.TestCase):
 class CustomRulesTests(unittest.TestCase):
     def test_custom_rules_load_after_builtins(self):
         import detection
-        custom = Path(detection.CUSTOM_RULES_PATH)
-        self.addCleanup(lambda: custom.unlink(missing_ok=True))
+        # Patch onto a temp path: writing the real config/rules.custom.yaml
+        # would destroy rules the user created through the Rules tab.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        custom = Path(temp.name) / "rules.custom.yaml"
+        patcher = patch.object(detection, "CUSTOM_RULES_PATH", custom)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         custom.write_text("rules:\n  - id: test-latency\n    when: {metric: proxy_latency_ms}\n"
                           "    condition: {type: greater_than, value: '${threshold}', default: 1000}\n"
                           "    severity: P3\n    message: 'Latency {value_int}ms exceeds {threshold_int}ms'\n",
