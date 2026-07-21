@@ -636,73 +636,226 @@
       padding: 10px 14px;
       border-top: 1px solid var(--border);
     }
+
+    /* --- health cluster ----------------------------------------------- */
+    .health {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .health .sep {
+      opacity: .4;
+    }
+
+    .health-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      cursor: default;
+    }
+
+    .health-dot.ok { background: var(--ok); }
+    .health-dot.degraded { background: var(--warn); }
+    .health-dot.failing { background: var(--bad); }
+    .health-dot.starting { background: var(--muted); }
+
+    /* --- pipeline strip ------------------------------------------------ */
+    .strip {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .stage-chip {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      min-width: 150px;
+      cursor: pointer;
+    }
+
+    .stage-chip.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent) inset;
+    }
+
+    .stage-chip .stage-name {
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stage-chip .stage-state {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .stage-chip .stage-cost {
+      font-size: 11px;
+      color: var(--muted);
+      display: none;
+    }
+
+    .strip.expanded .stage-chip .stage-cost {
+      display: block;
+    }
+
+    /* --- tiles: anomalies must not look like furniture ------------------ */
+    .tile.anomaly {
+      border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+      background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+    }
+
+    /* --- severity summary + filters ------------------------------------ */
+    .list-tools {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .summary {
+      display: flex;
+      gap: 6px;
+      font-size: 11px;
+    }
+
+    .summary .pill {
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--panel-2);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    .summary .pill.p1 { color: var(--bad); }
+    .summary .pill.p2 { color: var(--warn); }
+
+    .filters {
+      display: flex;
+      gap: 4px;
+    }
+
+    .filters .chip {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .filters .chip.on {
+      background: var(--panel-2);
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    .incident-row.filtered {
+      display: none;
+    }
+
+    @keyframes rowflash {
+      0% { background: color-mix(in srgb, var(--warn) 30%, var(--panel)); }
+      100% { background: transparent; }
+    }
+
+    .incident-row.flash {
+      animation: rowflash 2.5s ease-out 1;
+    }
+
+    /* --- toast ---------------------------------------------------------- */
+    #toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--bad);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      box-shadow: 0 4px 18px #0006;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .3s;
+      max-width: 340px;
+    }
+
+    #toast.show {
+      opacity: 1;
+    }
+
+    .pipeline-note .dismiss {
+      float: right;
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+    }
   </style>
 </head>
 
 <body>
   <header>
-    <h1>IBM MQ / ACE Triage Pipeline</h1>
+    <h1 id="app-title">Incident Triage Pipeline</h1>
     <div class="header-actions">
       <div class="tabs"><button class="tab active" data-view="dashboard"
           onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="kb"
-          onclick="switchView('kb')">Knowledge base</button></div><span id="collector" class="conn"></span><span
-        id="conn" class="conn down">connecting…</span>
+          onclick="switchView('kb')">Knowledge base</button></div>
+      <div id="health" class="health"><span id="conn" class="conn down">connecting…</span></div>
     </div>
   </header>
   <main id="dashboard-view">
-    <div class="pipeline-note"><strong>Processing:</strong> MCP collection + rules always run with no AI. AI is used
-      only for a new, eligible incident that has no strong approved knowledge-base match.</div>
+    <div class="pipeline-note" id="pipeline-note"><button class="dismiss" title="Dismiss"
+        onclick="dismissNote()">✕</button><strong>Processing:</strong> Collection + rules always run with no AI. AI is
+      used only for a new, eligible incident that has no strong approved knowledge-base match.</div>
     <section>
       <h2>Watched Objects</h2>
       <div id="tiles" class="tiles"><span class="empty">Waiting for first poll…</span></div>
     </section>
 
     <section>
-      <h2>Agent Activity</h2>
-      <div class="lanes">
-        <div class="lane" id="lane-watcher">
-          <div class="lane-title">
-            <h3>1. Collection & rules</h3><span class="mode rules">No AI</span>
-          </div>
-          <div class="model" id="model-watcher">MCP collector + rules</div>
-          <div class="activity" id="activity-watcher">Waiting for collection</div>
-          <div class="cost" id="cost-watcher">$0.00000 · 0 AI calls</div>
-        </div>
-        <div class="lane" id="lane-diagnostician">
-          <div class="lane-title">
-            <h3>2. Diagnostician</h3><span class="mode ai">AI · conditional</span>
-          </div>
-          <div class="model" id="model-diagnostician">Runs only for eligible new incidents</div>
-          <div class="activity" id="activity-diagnostician">Not needed yet</div>
-          <div class="cost" id="cost-diagnostician"><span>$0.00000 · 0 AI calls</span><span
-              id="ai-model-diagnostician">Model: Claude Haiku 4.5</span></div>
-        </div>
-        <div class="lane" id="lane-report_writer">
-          <div class="lane-title">
-            <h3>3. Report writer</h3><span class="mode ai">AI · conditional</span>
-          </div>
-          <div class="model" id="model-report_writer">Runs after AI diagnosis</div>
-          <div class="activity" id="activity-report_writer">Not needed yet</div>
-          <div class="cost" id="cost-report_writer"><span>$0.00000 · 0 AI calls</span><span
-              id="ai-model-report_writer">Model: Claude Haiku 4.5</span></div>
-        </div>
-      </div>
+      <h2>Pipeline <span class="empty" style="font-weight:400">(click for cost detail)</span></h2>
+      <div id="strip" class="strip" onclick="this.classList.toggle('expanded')"></div>
     </section>
 
     <section class="cols">
       <div>
         <h2>Incidents</h2>
+        <div class="list-tools">
+          <div id="summary" class="summary"></div>
+          <div id="filters" class="filters"></div>
+        </div>
         <div id="incidents" class="incidents">
           <div class="empty" style="padding:14px">None yet.</div>
         </div>
       </div>
       <div>
         <h2>Detail</h2>
-        <div id="detail" class="detail-panel"><span class="empty">Select an incident to view Watcher → Diagnostician →
+        <div id="detail" class="detail-panel"><span class="empty">Select an incident to view Collection → Diagnosis →
             Report.</span></div>
       </div>
     </section>
   </main>
+  <div id="toast" role="status"></div>
   <main id="kb-view" class="hidden">
     <section>
       <h2>Approved knowledge-base articles</h2>
@@ -730,16 +883,45 @@
   </dialog>
 
   <script>
-    const laneStats = { watcher: { cost: 0, calls: 0 }, diagnostician: { cost: 0, calls: 0 }, report_writer: { cost: 0, calls: 0 } };
     const incidentIds = new Set();
 
     function el(id) { return document.getElementById(id); }
     function formatTime(timestamp) {
       return timestamp ? new Date(timestamp * 1000).toLocaleString() : 'time unavailable';
     }
-    // Tiles refresh every poll, so the date would just be noise.
-    function formatClock(timestamp) {
-      return new Date(timestamp * 1000).toLocaleTimeString();
+
+    // Relative times everywhere: "32s ago" reads instantly where a clock time
+    // forces mental arithmetic. Absolute time lives in the hover title.
+    function relTime(timestamp) {
+      const seconds = Math.max(0, Date.now() / 1000 - timestamp);
+      if (seconds < 60) return `${Math.round(seconds)}s ago`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+      return `${Math.round(seconds / 86400)}d ago`;
+    }
+    function relSpan(timestamp, prefix = '') {
+      return `<span data-ts="${timestamp}" data-prefix="${prefix}" title="${formatTime(timestamp)}">${prefix}${relTime(timestamp)}</span>`;
+    }
+    setInterval(() => document.querySelectorAll('[data-ts]').forEach(node => {
+      node.textContent = node.dataset.prefix + relTime(+node.dataset.ts);
+    }), 10000);
+
+    // Errors surface as a toast, not a silently frozen page.
+    let toastTimer;
+    function toast(message) {
+      const node = el('toast');
+      node.textContent = message;
+      node.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => node.classList.remove('show'), 6000);
+    }
+
+    function dismissNote() {
+      localStorage.setItem('noteDismissed', '1');
+      el('pipeline-note').style.display = 'none';
+    }
+    if (localStorage.getItem('noteDismissed')) {
+      document.addEventListener('DOMContentLoaded', () => el('pipeline-note').style.display = 'none');
     }
 
     // status is 'ok' | 'anomaly' | 'unknown'; timestamp is when the reading was
@@ -758,32 +940,46 @@
         container.appendChild(node);
       }
       const dotClass = status === 'anomaly' ? 'warn' : status === 'ok' ? 'ok' : 'unknown';
+      node.classList.toggle('anomaly', status === 'anomaly');
       node.innerHTML = `<div class="type">${esc(objectType)} · ${esc(source)}</div>
     <div class="name"><span class="dot ${dotClass}"></span>${esc(objectName)}</div>
-    <div class="detail">${timestamp ? 'updated ' + formatClock(timestamp) : 'awaiting first poll'}</div>`;
+    <div class="detail">${timestamp ? relSpan(timestamp, 'updated ') : 'awaiting first poll'}</div>`;
+      // Anomalies cluster at the front so trouble is never below the fold.
+      if (status === 'anomaly') container.prepend(node); else container.appendChild(node);
     }
 
-    function setLaneActive(agent, text) {
-      el('lane-' + agent).classList.add('active');
-      el('activity-' + agent).textContent = text;
+    // --- pipeline strip: stages appear as their events arrive, so a new agent
+    // in the backend never crashes the dashboard — it just gets a chip. -----
+    const stages = {};
+    const STAGE_LABELS = { watcher: 'Collection & rules', diagnostician: 'Diagnostician', report_writer: 'Report writer' };
+
+    function stageChip(name) {
+      if (stages[name]) return stages[name];
+      const chip = document.createElement('div');
+      chip.className = 'stage-chip';
+      chip.id = 'stage-' + name;
+      const isAi = name !== 'watcher';
+      chip.innerHTML = `<div class="stage-name"><span>${esc(STAGE_LABELS[name] || name)}</span>
+        <span class="mode ${isAi ? 'ai' : 'rules'}">${isAi ? 'AI' : 'No AI'}</span></div>
+      <div class="stage-state">idle</div><div class="stage-cost">$0.00000 · 0 calls</div>`;
+      el('strip').appendChild(chip);
+      stages[name] = { node: chip, cost: 0, calls: 0 };
+      return stages[name];
     }
-    function setLaneIdle(agent, text) {
-      el('lane-' + agent).classList.remove('active');
-      el('activity-' + agent).textContent = text;
-    }
-    function bumpCost(agent, cost, model) {
-      laneStats[agent].cost += (cost || 0);
-      laneStats[agent].calls += 1;
-      const costElement = el('cost-' + agent);
-      if (agent === 'watcher') costElement.textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} calls`;
-      else costElement.querySelector('span').textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} AI calls`;
-      if (model) {
-        el('model-' + agent).textContent = model;
-        if (agent !== 'watcher') el('ai-model-' + agent).textContent = `Model: ${model}`;
+
+    function setStage(name, state, { active = false, cost, model } = {}) {
+      const stage = stageChip(name);
+      stage.node.classList.toggle('active', active);
+      stage.node.querySelector('.stage-state').textContent = state;
+      if (cost !== undefined) {
+        stage.cost += (cost || 0);
+        stage.calls += 1;
+        stage.node.querySelector('.stage-cost').textContent =
+          `$${stage.cost.toFixed(5)} · ${stage.calls} calls` + (model ? ` · ${model}` : '');
       }
     }
 
-    function prependIncident(evt) {
+    function prependIncident(evt, live = false) {
       const id = evt.payload.incident_id ?? evt.payload.id;
       if (!id || incidentIds.has(id)) return;
       incidentIds.add(id);
@@ -792,18 +988,48 @@
       // Remove only that message, not the container itself.
       container.querySelectorAll('.empty').forEach(e => e.remove());
       const row = document.createElement('div');
+      const severity = evt.payload.severity || 'P4';
       row.className = 'incident-row';
+      row.dataset.severity = severity;
       const trigger = triggerKind(evt.payload.trigger_source);
       const createdAt = evt.payload.created_at ?? evt.ts;
       row.innerHTML = `<span>
       <span class="incident-id">#${esc(id)}</span>
       <span class="trigger-badge trigger-${esc(trigger)}">${trigger === 'event' ? '⚡ event' : 'poll'}</span>
       ${esc(evt.payload.title || evt.payload.object_name)}
-      <span class="incident-time">Generated: ${formatTime(createdAt)}</span>
+      <span class="incident-time">${relSpan(createdAt, 'Generated: ')}</span>
     </span>
-    <span class="sev sev-${esc(evt.payload.severity || 'P4')}">${esc(evt.payload.severity || '—')}</span>`;
+    <span class="sev sev-${esc(severity)}">${esc(evt.payload.severity || '—')}</span>`;
       row.onclick = () => loadIncident(id);
+      if (activeFilter && severity !== activeFilter) row.classList.add('filtered');
+      // A serious incident arriving live should catch the eye, once.
+      if (live && (severity === 'P1' || severity === 'P2')) row.classList.add('flash');
       container.prepend(row);
+      updateSummary();
+    }
+
+    // --- severity summary + filters ------------------------------------
+    let activeFilter = null;
+
+    function updateSummary() {
+      const rows = [...document.querySelectorAll('#incidents .incident-row')];
+      const counts = { P1: 0, P2: 0, P3: 0, P4: 0 };
+      rows.forEach(row => { if (counts[row.dataset.severity] !== undefined) counts[row.dataset.severity]++; });
+      el('summary').innerHTML = `<span class="pill p1">P1 ${counts.P1}</span><span class="pill p2">P2 ${counts.P2}</span>
+        <span class="pill">P3 ${counts.P3}</span><span class="pill">P4 ${counts.P4}</span><span class="pill">total ${rows.length}</span>`;
+    }
+
+    function renderFilters() {
+      el('filters').innerHTML = ['P1', 'P2', 'P3', 'P4'].map(sev =>
+        `<button class="chip ${activeFilter === sev ? 'on' : ''}" onclick="setFilter('${sev}')">${sev}</button>`).join('')
+        + `<button class="chip ${activeFilter === null ? 'on' : ''}" onclick="setFilter(null)">All</button>`;
+    }
+
+    function setFilter(severity) {
+      activeFilter = severity;
+      renderFilters();
+      document.querySelectorAll('#incidents .incident-row').forEach(row =>
+        row.classList.toggle('filtered', !!severity && row.dataset.severity !== severity));
     }
 
     async function loadIncident(id) {
@@ -984,35 +1210,56 @@
     // The socket's opening frame carries current state, so the panel paints on
     // load rather than waiting a whole poll interval for the next event.
     function applySnapshot(payload) {
+      if (payload.title) {
+        el('app-title').textContent = payload.title;
+        document.title = payload.title;
+      }
       const objects = payload.watched_objects || [];
       if (objects.length) {
         objects.forEach(o => renderTile(o.source, o.object_name, o.object_type, o.status, o.timestamp));
       } else if (payload.collector && payload.collector.status === 'degraded') {
-        el('tiles').innerHTML = '<span class="empty">Collection is running but returned no readings — check that the queue managers behind the MCP server are reachable.</span>';
+        el('tiles').innerHTML = '<span class="empty">Collection is running but returned no readings — check that the systems behind the collectors are reachable.</span>';
       } else {
-        el('tiles').innerHTML = '<span class="empty">No readings yet — awaiting the first collection cycle.</span>';
+        el('tiles').innerHTML = '<span class="empty">No readings yet — the first collection cycle lands within one poll interval.</span>';
       }
+      stageChip('watcher');
       renderCollectorHealth(payload.collector);
     }
 
     // Collection can die independently of this socket, so "live" alone would be
-    // a misleading green light. Stale tiles go grey rather than keep implying
-    // the readings on them are current.
+    // a misleading green light: one dot per collector, tooltip carrying the
+    // detail, summary text only when something is actually wrong.
     function renderCollectorHealth(collector) {
-      const node = el('collector');
-      if (!collector) { node.textContent = ''; node.className = 'conn'; return; }
-      const failing = collector.status === 'failing';
-      // "degraded" means the MCP endpoint answered but returned no readings —
-      // healthy plumbing, nothing behind it. Not ok, but not a failure either.
-      const degraded = collector.status === 'degraded';
-      node.className = failing || degraded ? 'conn down' : 'conn live';
-      node.textContent = failing
-        ? `collector failing (${collector.consecutive_failures}×, retry in ${collector.next_attempt_in}s)`
-        : degraded ? 'collector degraded — no readings returned'
-          : collector.status === 'ok' ? 'collector ok' : 'collector starting…';
-      if (failing) {
-        document.querySelectorAll('#tiles .tile .dot').forEach(dot => dot.className = 'dot unknown');
+      const health = el('health');
+      health.querySelectorAll('.coll').forEach(node => node.remove());
+      const collectors = collector && collector.collectors ? Object.entries(collector.collectors) : [];
+      if (!collectors.length) return;
+      const fragment = document.createDocumentFragment();
+      const sep = document.createElement('span');
+      sep.className = 'sep coll'; sep.textContent = '·';
+      fragment.appendChild(sep);
+      for (const [name, h] of collectors) {
+        const dot = document.createElement('span');
+        dot.className = `health-dot coll ${h.status || 'starting'}`;
+        dot.title = `${name}: ${h.status}`
+          + (h.last_error ? ` — ${h.last_error}` : '')
+          + (h.status === 'failing' ? ` (retry in ${h.next_attempt_in}s)` : '');
+        fragment.appendChild(dot);
       }
+      if (collector.status === 'failing' || collector.status === 'degraded') {
+        const label = document.createElement('span');
+        label.className = 'coll';
+        label.style.color = collector.status === 'failing' ? 'var(--bad)' : 'var(--warn)';
+        label.textContent = collector.status === 'failing'
+          ? `collector failing — retry in ${collector.next_attempt_in}s`
+          : 'collector degraded — no readings';
+        fragment.appendChild(label);
+        // Stale tiles must not keep implying their readings are current.
+        if (collector.status === 'failing') {
+          document.querySelectorAll('#tiles .tile .dot').forEach(dot => dot.className = 'dot unknown');
+        }
+      }
+      health.appendChild(fragment);
     }
 
     function switchView(view) {
@@ -1073,44 +1320,54 @@
       ws.onopen = () => { el('conn').textContent = 'live'; el('conn').className = 'conn live'; };
       ws.onclose = () => { el('conn').textContent = 'disconnected — retrying…'; el('conn').className = 'conn down'; setTimeout(connect, 2000); };
       ws.onerror = () => ws.close();
+      // One bad event must not silently kill every event after it.
       ws.onmessage = (msg) => {
-        const evt = JSON.parse(msg.data);
-        switch (evt.type) {
-          case 'state_snapshot':
-            applySnapshot(evt.payload);
-            break;
-          case 'collector_status':
-            renderCollectorHealth(evt.payload);
-            break;
-          case 'observation_received': {
-            // Enterprise collection is rule-based, not the legacy AI Watcher.
-            // Treat each normalized observation as Watcher activity without
-            // recording it as a model call or cost.
-            const observation = evt.payload.observation;
-            const isAnomalous = Boolean(evt.payload.finding);
-            renderTile(observation.source, observation.object_name, observation.object_type, isAnomalous ? 'anomaly' : 'ok', observation.timestamp);
-            setLaneIdle('watcher', `Last: ${observation.object_name} (${isAnomalous ? 'anomaly' : 'ok'})`);
-            el('model-watcher').textContent = 'MCP collector + rules';
-            break;
-          }
-          case 'agent_started':
-            setLaneActive(evt.payload.agent, `Working on ${evt.payload.object_name}…`);
-            break;
-          case 'agent_completed':
-            setLaneIdle(evt.payload.agent, `Done: ${evt.payload.object_name}`);
-            bumpCost(evt.payload.agent, evt.payload.cost_usd, evt.payload.model);
-            break;
-          case 'agent_failed':
-            setLaneIdle(evt.payload.agent, `Failed: ${evt.payload.object_name}`);
-            break;
-          case 'incident_created':
-            prependIncident(evt);
-            break;
+        try {
+          handleEvent(JSON.parse(msg.data));
+        } catch (error) {
+          console.error('event handling failed', error);
+          toast(`Dashboard event error: ${error.message}`);
         }
       };
     }
+
+    function handleEvent(evt) {
+      switch (evt.type) {
+        case 'state_snapshot':
+          applySnapshot(evt.payload);
+          break;
+        case 'collector_status':
+          renderCollectorHealth(evt.payload);
+          break;
+        case 'observation_received': {
+          // Collection is rule-based: each normalized observation is stage
+          // activity with no model call or cost attached.
+          const observation = evt.payload.observation;
+          const isAnomalous = Boolean(evt.payload.finding);
+          renderTile(observation.source, observation.object_name, observation.object_type, isAnomalous ? 'anomaly' : 'ok', observation.timestamp);
+          setStage('watcher', `Last: ${observation.object_name} (${isAnomalous ? 'anomaly' : 'ok'})`);
+          break;
+        }
+        case 'agent_started':
+          setStage(evt.payload.agent, `Working on ${evt.payload.object_name}…`, { active: true });
+          break;
+        case 'agent_completed':
+          setStage(evt.payload.agent, `Done: ${evt.payload.object_name}`,
+            { cost: evt.payload.cost_usd, model: evt.payload.model });
+          break;
+        case 'agent_failed':
+          setStage(evt.payload.agent, `Failed: ${evt.payload.object_name}`);
+          break;
+        case 'incident_created':
+          prependIncident(evt, true);
+          break;
+      }
+    }
+
     connect();
-    loadIncidents();
+    loadIncidents().catch(() => toast('Could not load the incident list.'));
+    renderFilters();
+    updateSummary();
   </script>
 </body>
 

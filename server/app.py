@@ -29,12 +29,17 @@ from enterprise_pipeline import EnterprisePipeline  # noqa: E402
 from detection import Observation  # noqa: E402
 from knowledge.service import draft_from_incident, search as search_kb  # noqa: E402
 from collector_loop import collect_forever, collector_health  # noqa: E402
+from agents.common import load_watchlist  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 enterprise_pipeline = EnterprisePipeline(
     use_ai=os.getenv("ENABLE_INCIDENT_AI", "false").lower() == "true"
 )
+try:
+    DASHBOARD_TITLE = load_watchlist().dashboard_title
+except Exception:  # a broken watchlist must not stop the server from starting
+    DASHBOARD_TITLE = "Incident Triage Pipeline"
 _enterprise_collect_task: asyncio.Task | None = None
 
 
@@ -202,6 +207,7 @@ async def ws_events(websocket: WebSocket) -> None:
         # the live events that supersede it. Constructed, not published — a
         # published snapshot would land in every other client's history.
         await websocket.send_json(Event("state_snapshot", {
+            "title": DASHBOARD_TITLE,
             "watched_objects": enterprise_pipeline.watched_objects(),
             "collector": collector_health(),
         }).to_dict())
