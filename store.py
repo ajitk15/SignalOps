@@ -53,6 +53,7 @@ def save_incident(
     report_json: dict,
     total_cost_usd: float,
     trigger_source: str = "poll",
+    created_at: float | None = None,
 ) -> int:
     conn = _connect()
     try:
@@ -66,7 +67,10 @@ def save_incident(
             (
                 object_name, object_type, severity, title, markdown_report,
                 json.dumps(watcher_json), json.dumps(diagnosis_json), json.dumps(report_json),
-                total_cost_usd, trigger_source, time.time(),
+                total_cost_usd, trigger_source,
+                # Callers that also announce the incident pass their own value so
+                # the event and the stored row report the same creation time.
+                time.time() if created_at is None else created_at,
             ),
         )
         return cur.lastrowid
