@@ -45,7 +45,7 @@
   .lane .model { color:var(--muted); font-size:11px; margin-bottom:10px; }
   .lane .activity { font-size:13px; min-height:36px; }
   .lane.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
-  .lane .cost { margin-top:10px; font-size:12px; color:var(--muted); border-top:1px solid var(--border); padding-top:8px; }
+  .lane .cost { margin-top:10px; font-size:12px; color:var(--muted); border-top:1px solid var(--border); padding-top:8px; display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; }
   .cols { display:grid; grid-template-columns:1fr 1.3fr; gap:20px; align-items:start; }
   .incidents { background:var(--panel); border:1px solid var(--border); border-radius:10px; max-height:400px; overflow:auto; }
   .incident-row { padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
@@ -117,8 +117,8 @@
     <h2>Agent Activity</h2>
     <div class="lanes">
       <div class="lane" id="lane-watcher"><div class="lane-title"><h3>1. Collection & rules</h3><span class="mode rules">No AI</span></div><div class="model" id="model-watcher">MCP collector + rules</div><div class="activity" id="activity-watcher">Waiting for collection</div><div class="cost" id="cost-watcher">$0.00000 · 0 AI calls</div></div>
-      <div class="lane" id="lane-diagnostician"><div class="lane-title"><h3>2. Diagnostician</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-diagnostician">Runs only for eligible new incidents</div><div class="activity" id="activity-diagnostician">Not needed yet</div><div class="cost" id="cost-diagnostician">$0.00000 · 0 AI calls</div></div>
-      <div class="lane" id="lane-report_writer"><div class="lane-title"><h3>3. Report writer</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-report_writer">Runs after AI diagnosis</div><div class="activity" id="activity-report_writer">Not needed yet</div><div class="cost" id="cost-report_writer">$0.00000 · 0 AI calls</div></div>
+      <div class="lane" id="lane-diagnostician"><div class="lane-title"><h3>2. Diagnostician</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-diagnostician">Runs only for eligible new incidents</div><div class="activity" id="activity-diagnostician">Not needed yet</div><div class="cost" id="cost-diagnostician"><span>$0.00000 · 0 AI calls</span><span id="ai-model-diagnostician">Model: Claude Haiku 4.5</span></div></div>
+      <div class="lane" id="lane-report_writer"><div class="lane-title"><h3>3. Report writer</h3><span class="mode ai">AI · conditional</span></div><div class="model" id="model-report_writer">Runs after AI diagnosis</div><div class="activity" id="activity-report_writer">Not needed yet</div><div class="cost" id="cost-report_writer"><span>$0.00000 · 0 AI calls</span><span id="ai-model-report_writer">Model: Claude Haiku 4.5</span></div></div>
     </div>
   </section>
 
@@ -176,8 +176,13 @@ function setLaneIdle(agent, text) {
 function bumpCost(agent, cost, model) {
   laneStats[agent].cost += (cost || 0);
   laneStats[agent].calls += 1;
-  el('cost-' + agent).textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} AI calls`;
-  if (model) el('model-' + agent).textContent = model;
+  const cost = el('cost-' + agent);
+  if (agent === 'watcher') cost.textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} calls`;
+  else cost.querySelector('span').textContent = `$${laneStats[agent].cost.toFixed(5)} · ${laneStats[agent].calls} AI calls`;
+  if (model) {
+    el('model-' + agent).textContent = model;
+    if (agent !== 'watcher') el('ai-model-' + agent).textContent = `Model: ${model}`;
+  }
 }
 
 function prependIncident(evt) {
