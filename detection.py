@@ -1,12 +1,19 @@
-"""Deterministic, zero-LLM signal detection and incident correlation."""
+"""Deterministic, zero-LLM signal detection and incident correlation.
+
+Detection rules live in config/rules.yaml; this module only provides the
+evaluation semantics. Adding a platform's rules is a config edit, not code.
+"""
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import yaml
 
 SEVERITY_RANK = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
+RULES_PATH = Path(__file__).resolve().parent / "config" / "rules.yaml"
 
 
 @dataclass
@@ -31,44 +38,136 @@ class Finding:
 
 
 class RuleEngine:
-    def __init__(self, *, default_depth_threshold: float = 1000, trend_points: int = 3):
-        self.default_depth_threshold = default_depth_threshold
+    """Evaluates config/rules.yaml against observations, first match wins.
+
+    Four semantics preserve the original hardcoded elif engine exactly:
+    - a rule whose `when` matches but whose condition is false falls through;
+    - trend history updates for every observation of a metric that has a
+      `rising` rule, before rule selection, so a higher rule winning cannot
+      starve a later rule's state;
+    - `not_in` comparisons are case-folded;
+    - `escalate.at_factor` is inclusive (value >= threshold * factor).
+    """
+
+    def __init__(self, *, default_depth_threshold: float = 1000, trend_points: int = 3,
+                 rules_path: Path | None = None):
+        # Settings referenced from rules.yaml via "${name}" placeholders.
+        self.settings = {"default_depth_threshold": default_depth_threshold}
         self.trend_points = trend_points
+        self.rules = yaml.safe_load((rules_path or RULES_PATH).read_text(encoding="utf-8"))["rules"]
         self._history: dict[str, list[float]] = {}
+        # Metrics with at least one `rising` rule need history for every
+        # observation, whichever rule ends up firing.
+        self._stateful_metrics = {metric for rule in self.rules
+                                  if rule["condition"]["type"] == "rising"
+                                  for metric in self._metrics_of(rule)}
+
+    @staticmethod
+    def _metrics_of(rule: dict) -> list[str]:
+        metric = rule.get("when", {}).get("metric", [])
+        return metric if isinstance(metric, list) else [metric]
 
     def evaluate(self, obs: Observation) -> Finding | None:
-        key = f"{obs.source}:{obs.object_type}:{obs.object_name}:{obs.metric}"
-        value_text = str(obs.value).upper()
-        reason = ""
-        severity = "P3"
+        history = self._update_history(obs)
+        for rule in self.rules:
+            if not self._when_matches(rule.get("when", {}), obs):
+                continue
+            context = self._check_condition(rule["condition"], obs, history)
+            if context is None:
+                continue  # condition false — fall through, as the elif chain did
+            severity = rule["severity"]
+            escalate = rule.get("escalate")
+            if escalate and context.get("threshold") is not None \
+                    and float(obs.value) >= context["threshold"] * escalate["at_factor"]:
+                severity = escalate["severity"]
+            reason = rule["message"].format(**context)
+            service = obs.labels.get("service", obs.object_name)
+            fingerprint = f"{obs.labels.get('environment', 'unknown')}:{service}:{obs.metric}"
+            return Finding(fingerprint, severity, reason, obs, [reason])
+        return None
 
-        if obs.metric == "queue_depth":
-            depth = float(obs.value)
-            threshold = obs.threshold if obs.threshold is not None else self.default_depth_threshold
-            history = self._history.setdefault(key, [])
-            history.append(depth)
-            del history[:-self.trend_points]
-            is_dlq = "DLQ" in obs.object_name.upper() or obs.labels.get("role") == "dlq"
-            rising = len(history) >= self.trend_points and all(a < b for a, b in zip(history, history[1:]))
-            if is_dlq and depth > 0:
-                reason, severity = f"DLQ contains {int(depth)} message(s)", "P2"
-            elif depth > threshold:
-                reason = f"Queue depth {int(depth)} exceeds threshold {int(threshold)}"
-                severity = "P2" if depth >= threshold * 2 else "P3"
-            elif rising:
-                reason = f"Queue depth is rising across {self.trend_points} observations: {history}"
-        elif obs.metric == "channel_status" and value_text not in {"RUNNING", "INACTIVE"}:
-            reason, severity = f"Channel status is {value_text}", "P2"
-        elif obs.metric == "ace_flow_status" and value_text not in {"RUNNING", "STARTED"}:
-            reason, severity = f"ACE flow status is {value_text}", "P2"
-        elif obs.metric in {"error_count", "exception_count"} and float(obs.value) > (obs.threshold or 0):
-            reason, severity = f"{obs.metric} is {obs.value}", "P2"
+    # -- state -----------------------------------------------------------------
 
-        if not reason:
+    def _update_history(self, obs: Observation) -> list[float] | None:
+        if obs.metric not in self._stateful_metrics:
             return None
-        service = obs.labels.get("service", obs.object_name)
-        fingerprint = f"{obs.labels.get('environment','unknown')}:{service}:{obs.metric}"
-        return Finding(fingerprint, severity, reason, obs, [reason])
+        key = f"{obs.source}:{obs.object_type}:{obs.object_name}:{obs.metric}"
+        history = self._history.setdefault(key, [])
+        history.append(float(obs.value))
+        del history[:-self.trend_points]
+        return history
+
+    # -- matching --------------------------------------------------------------
+
+    def _when_matches(self, when: dict, obs: Observation) -> bool:
+        metrics = self._metrics_of({"when": when})
+        if metrics and obs.metric not in metrics:
+            return False
+        any_of = when.get("any_of")
+        if any_of and not any(self._selector_matches(selector, obs) for selector in any_of):
+            return False
+        return True
+
+    @staticmethod
+    def _selector_matches(selector: dict, obs: Observation) -> bool:
+        if "name_contains" in selector:
+            return selector["name_contains"].upper() in obs.object_name.upper()
+        if "label_equals" in selector:
+            return all(obs.labels.get(k) == v for k, v in selector["label_equals"].items())
+        return False
+
+    # -- conditions ------------------------------------------------------------
+
+    def _resolve(self, value):
+        """Resolve "${threshold}"-style placeholders against engine settings."""
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            return self.settings[value[2:-1]]
+        return value
+
+    def _check_condition(self, condition: dict, obs: Observation,
+                         history: list[float] | None) -> dict | None:
+        """Return the message-template context when true, else None."""
+        kind = condition["type"]
+
+        if kind == "greater_than":
+            numeric = float(obs.value)
+            configured = condition["value"]
+            if configured == "${threshold}":
+                threshold = obs.threshold if obs.threshold is not None \
+                    else float(self._resolve(condition.get("default", 0)))
+            else:
+                threshold = float(self._resolve(configured))
+            if numeric > threshold:
+                return self._context(obs, history, threshold=threshold)
+            return None
+
+        if kind == "not_in":
+            value_text = str(obs.value).upper()
+            if value_text not in {str(v).upper() for v in condition["values"]}:
+                return self._context(obs, history)
+            return None
+
+        if kind == "rising":
+            if history is not None and len(history) >= self.trend_points \
+                    and all(a < b for a, b in zip(history, history[1:])):
+                return self._context(obs, history)
+            return None
+
+        raise ValueError(f"unknown condition type: {kind}")
+
+    def _context(self, obs: Observation, history: list[float] | None,
+                 threshold: float | None = None) -> dict:
+        context = {"value": obs.value, "value_text": str(obs.value).upper(),
+                   "metric": obs.metric, "object_name": obs.object_name,
+                   "history": history, "trend_points": self.trend_points,
+                   "threshold": threshold}
+        try:
+            context["value_int"] = int(float(obs.value))
+        except (TypeError, ValueError):
+            pass
+        if threshold is not None:
+            context["threshold_int"] = int(threshold)
+        return context
 
 
 class Correlator:
