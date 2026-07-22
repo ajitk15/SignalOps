@@ -1445,3 +1445,42 @@ button.status-pill:hover {
   border-color: var(--border);
   color: var(--muted);
 }
+
+/* --- runs, approvals and workflow cards ----------------------------------- */
+
+/* Run status reuses the tier-badge shape; only the colour differs. */
+.tier-badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.tier-badge.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.tier-badge.bad {
+  color: var(--danger, #ff6b6b);
+  border-color: color-mix(in srgb, var(--danger, #ff6b6b) 45%, transparent);
+}
+
+/* The plan is the thing being approved, so it gets room to be read rather than
+   being squeezed into a summary line. */
+.plan-steps {
+  margin: 10px 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 10px;
+}
+
+.plan-steps li { line-height: 1.5; }
+
+.prompt-view {
+  margin: 6px 0 12px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--panel-2, rgba(255, 255, 255, .03));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

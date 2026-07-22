@@ -1,0 +1,7 @@
+# Standalone SignalOps workflow. Pinned to major versions that the exported
+# workflow.py is written against — a surprise major bump is not something you
+# want to discover mid-incident.
+anthropic>=0.118,<1.0
+langgraph>=1.0,<2.0
+langgraph-checkpoint-sqlite>=3.0,<4.0
+pydantic>=2.7,<3.0

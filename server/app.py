@@ -34,8 +34,14 @@ from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
 from auth import (SESSION_COOKIE, Principal, current_principal, issue_session,  # noqa: E402
                   provider, record_login, require_role)
 from db import audit, audit_entries, init_db, session_scope  # noqa: E402
+from engine import workflow_export  # noqa: E402
+from engine.approvals import StaleApproval  # noqa: E402
+from engine.runtime import (TEMPLATES, DuplicateRun, EngineError,  # noqa: E402
+                            engine)
+from engine.state import Halted  # noqa: E402
 from events import Event, bus  # noqa: E402
-from models import AgentConfig, Role, Workspace  # noqa: E402
+from models import (AgentConfig, Approval, ApprovalStatus, Role, Run,  # noqa: E402
+                    RunStatus, RunStep, Workflow, Workspace)
 
 # Which tools sit at each tier — shown in the UI so the envelope is legible.
 TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
@@ -76,11 +82,30 @@ async def static_asset(filename: str) -> FileResponse:
     return FileResponse(DASHBOARD_DIR / filename, headers={"Cache-Control": "no-cache"})
 
 
+@app.on_event("startup")
+async def on_startup() -> None:
+    # Runs execute on a thread pool; the bus needs to know which loop the
+    # WebSocket subscribers live on before anything publishes from a worker.
+    bus.bind_loop()
+    resumed = engine().reconcile()
+    if resumed:
+        logger.info("resumed %d run(s) left in flight by the previous process", resumed)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    engine().shutdown()
+
+
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "env": ENV, "phase": "0b",
+    return {"status": "ok", "env": ENV, "phase": "2",
             "auth_provider": provider().name,
-            "identity_verified": provider().verifies_identity}
+            "identity_verified": provider().verifies_identity,
+            # Whether the engine will call a model or simulate. Surfaced so a
+            # simulated deployment is visible without reading a log.
+            "model_client": engine().client.name,
+            "simulated": engine().client.simulated}
 
 
 # --- authentication ----------------------------------------------------------
@@ -307,6 +332,228 @@ async def export_agents(principal: Principal = Depends(require_role(Role.viewer)
     return Response(
         content=archive, media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="signalops-agents.zip"'})
+
+
+# --- workflows ---------------------------------------------------------------
+
+class WorkflowRequest(BaseModel):
+    template: str
+    name: str = Field(min_length=1, max_length=120)
+    dry_run: bool = True
+    run_budget_usd: float = Field(default=1.0, gt=0, le=100)
+
+
+def _workflow_view(workflow: Workflow) -> dict:
+    return {"id": workflow.id, "template": workflow.template, "name": workflow.name,
+            "config": workflow.config, "enabled": workflow.enabled,
+            "dry_run_passed_at": workflow.dry_run_passed_at,
+            "created_at": workflow.created_at,
+            "exportable": workflow.template in workflow_export.TEMPLATES}
+
+
+@app.get("/api/workflows")
+async def list_workflows(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        workflows = (session.query(Workflow)
+                     .filter(Workflow.workspace_id == principal.workspace_id)
+                     .order_by(Workflow.created_at.desc()).all())
+        views = [_workflow_view(w) for w in workflows]
+    return {"workflows": views,
+            "templates": [{"id": key, "name": meta["name"]}
+                          for key, meta in workflow_export.TEMPLATES.items()]}
+
+
+@app.post("/api/workflows")
+async def create_workflow(payload: WorkflowRequest,
+                          principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    if payload.template not in TEMPLATES:
+        raise HTTPException(status_code=422, detail="unknown template")
+    with session_scope() as session:
+        workflow = Workflow(workspace_id=principal.workspace_id, template=payload.template,
+                            name=payload.name, created_by=principal.user.id,
+                            config={"dry_run": payload.dry_run,
+                                    "run_budget_usd": payload.run_budget_usd})
+        session.add(workflow)
+        session.flush()
+        audit(session, actor=principal.user.display_name, action="workflow_created",
+              entity_type="workflow", entity_id=workflow.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"template": payload.template, "name": payload.name})
+        view = _workflow_view(workflow)
+    return view
+
+
+@app.get("/api/workflows/{workflow_id}/export")
+async def export_workflow(workflow_id: str,
+                          principal: Principal = Depends(require_role(Role.viewer))) -> Response:
+    """The whole workflow as a standalone Python app — lift and shift.
+
+    Includes the graph, the agents, a Dockerfile and a setup document. The
+    README states what does not travel: audit, roles, tier enforcement,
+    budgets and the kill switch are platform features, not graph features.
+    """
+    with session_scope() as session:
+        workflow = session.get(Workflow, workflow_id)
+        if workflow is None or workflow.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown workflow")
+        try:
+            archive = workflow_export.bundle(
+                template=workflow.template, workflow_name=workflow.name,
+                agent_configs=_workspace_agent_configs(session, principal.workspace_id))
+        except KeyError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        filename = workflow_export.filename_for(workflow.name)
+        audit(session, actor=principal.user.display_name, action="workflow_exported",
+              entity_type="workflow", entity_id=workflow_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"bytes": len(archive)})
+    return Response(content=archive, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# --- runs --------------------------------------------------------------------
+
+class StartRunRequest(BaseModel):
+    # The ticket is untrusted data. It is never treated as instructions; see
+    # engine/llm.py for how it is fenced in the prompt.
+    ticket: dict
+    dry_run: bool | None = None
+
+
+def _run_view(run: Run) -> dict:
+    return {"id": run.id, "workflow_id": run.workflow_id, "status": run.status.value,
+            "trigger_ref": run.trigger_ref, "dry_run": run.dry_run,
+            "started_at": run.started_at, "finished_at": run.finished_at,
+            "cost_usd": run.cost_usd, "error": run.error}
+
+
+@app.post("/api/workflows/{workflow_id}/runs")
+async def start_run(workflow_id: str, payload: StartRunRequest,
+                    principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    with session_scope() as session:
+        workflow = session.get(Workflow, workflow_id)
+        if workflow is None or workflow.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown workflow")
+    try:
+        run_id = engine().start(workflow_id=workflow_id, ticket=payload.ticket,
+                                actor=principal.user.display_name,
+                                actor_verified=principal.user.identity_verified,
+                                dry_run=payload.dry_run)
+    except DuplicateRun as duplicate:
+        # 409 with the run that already exists — a poller re-seeing a ticket
+        # should be able to follow the link, not treat this as an error.
+        raise HTTPException(status_code=409,
+                            detail={"message": str(duplicate),
+                                    "run_id": duplicate.run_id}) from duplicate
+    except Halted as halt:
+        # 409: the request was valid, the workspace is stopped.
+        raise HTTPException(status_code=409, detail=str(halt)) from halt
+    except EngineError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"run_id": run_id, "status": "started"}
+
+
+@app.get("/api/runs")
+async def list_runs(limit: int = 50,
+                    principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        runs = (session.query(Run).filter(Run.workspace_id == principal.workspace_id)
+                .order_by(Run.started_at.desc()).limit(min(limit, 200)).all())
+        views = [_run_view(r) for r in runs]
+    return {"runs": views}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str,
+                  principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None or run.workspace_id != principal.workspace_id:
+            # 404 rather than 403: a cross-workspace 403 confirms the run exists.
+            raise HTTPException(status_code=404, detail="unknown run")
+        steps = [{"id": s.id, "node": s.node, "agent_id": s.agent_id, "status": s.status,
+                  "started_at": s.started_at, "finished_at": s.finished_at,
+                  "output": s.output, "cost_usd": s.cost_usd,
+                  "input_tokens": s.input_tokens, "output_tokens": s.output_tokens,
+                  "error": s.error}
+                 for s in session.query(RunStep).filter(RunStep.run_id == run_id)
+                 .order_by(RunStep.started_at).all()]
+        approvals = [_approval_view(a) for a in session.query(Approval)
+                     .filter(Approval.run_id == run_id)
+                     .order_by(Approval.requested_at).all()]
+        view = _run_view(run)
+    return {**view, "steps": steps, "approvals": approvals}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str,
+                     principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None or run.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown run")
+    try:
+        engine().cancel(run_id=run_id, actor=principal.user.display_name,
+                        actor_verified=principal.user.identity_verified)
+    except EngineError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"run_id": run_id, "status": "cancelled"}
+
+
+# --- approvals ---------------------------------------------------------------
+
+class DecisionRequest(BaseModel):
+    approved: bool
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def _approval_view(approval: Approval) -> dict:
+    return {"id": approval.id, "run_id": approval.run_id, "node": approval.node,
+            "summary": approval.summary, "payload": approval.payload,
+            "payload_hash": approval.payload_hash, "status": approval.status.value,
+            "requested_at": approval.requested_at, "decided_at": approval.decided_at,
+            "note": approval.note}
+
+
+@app.get("/api/approvals")
+async def list_approvals(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        pending = (session.query(Approval).join(Run, Approval.run_id == Run.id)
+                   .filter(Run.workspace_id == principal.workspace_id,
+                           Approval.status == ApprovalStatus.pending)
+                   .order_by(Approval.requested_at).all())
+        views = [_approval_view(a) for a in pending]
+    return {"approvals": views,
+            # A viewer can see the queue but not act on it; the UI uses this to
+            # explain the disabled buttons rather than just showing them greyed.
+            "can_decide": principal.can(Role.approver)}
+
+
+@app.post("/api/approvals/{approval_id}")
+async def decide_approval(approval_id: str, payload: DecisionRequest,
+                          principal: Principal = Depends(require_role(Role.approver))) -> dict:
+    with session_scope() as session:
+        approval = session.get(Approval, approval_id)
+        if approval is None:
+            raise HTTPException(status_code=404, detail="unknown approval")
+        run = session.get(Run, approval.run_id)
+        if run is None or run.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown approval")
+    try:
+        run_id = engine().decide(approval_id=approval_id, approved=payload.approved,
+                                 actor=principal.user.display_name,
+                                 actor_id=principal.user.id,
+                                 actor_verified=principal.user.identity_verified,
+                                 note=payload.note)
+    except StaleApproval as stale:
+        # 409 Conflict is the accurate answer: what you approved is not what is
+        # there now.
+        raise HTTPException(status_code=409, detail=str(stale)) from stale
+    except EngineError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"run_id": run_id, "approved": payload.approved}
 
 
 # --- audit -------------------------------------------------------------------

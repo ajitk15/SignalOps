@@ -1,7 +1,11 @@
 # SignalOps v2 — agentic workflow platform.
-# Only what currently has a consumer. LangGraph, langchain-anthropic, SQLAlchemy
-# and the git/PR clients land with the phases that use them, so an unused
-# dependency never sits here pretending to be load-bearing.
+# Only what currently has a consumer. The git/PR clients land with phase 4, so
+# an unused dependency never sits here pretending to be load-bearing.
+#
+# No langchain-anthropic: LangGraph orchestrates (checkpointing, interrupts,
+# routing) and the Anthropic SDK is called directly inside the nodes. A model
+# abstraction between an already-resolved agent and the API would be a layer
+# with nothing to translate.
 
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
@@ -11,3 +15,6 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 sqlalchemy>=2.0
 itsdangerous>=2.0
+langgraph>=1.0,<2.0
+langgraph-checkpoint-sqlite>=3.0,<4.0
+anthropic>=0.118,<1.0

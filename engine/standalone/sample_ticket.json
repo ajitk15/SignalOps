@@ -1,0 +1,18 @@
+{
+  "number": "INC0012345",
+  "short_description": "IBM MQ channel SYSTEM.ADMIN.SVRCONN in RETRYING on QM1",
+  "description": "Channel has been retrying for 20 minutes. Applications connecting to QM1 report 2059 connection refused. Queue depth on APP.REQUEST is climbing and now sits at 8200 of a 10000 maximum.",
+  "configuration_item": "QM1",
+  "priority": "P2",
+  "opened_at": "2026-07-22T09:14:00Z",
+  "recent_changes": [
+    "CHG0004411 — firewall rule update on the QM1 subnet, applied 08:55Z",
+    "CHG0004402 — MQ 9.3.5 fix pack applied to QM1, applied three days ago"
+  ],
+  "past_incidents": [
+    "INC0011980 — same channel RETRYING after a firewall change; resolved by restoring the rule"
+  ],
+  "kb_articles": [
+    "KB0010023 — Diagnosing MQ 2059 errors: check listener, channel status and firewall path"
+  ]
+}
