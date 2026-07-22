@@ -47,20 +47,30 @@ def build(ctx: RunContext):
         """Gather what is known around the incident.
 
         Deterministic on purpose: the agents reason about evidence, they do not
-        go and fetch it. Anything the caller did not supply is recorded as
-        unavailable rather than quietly absent, so a thin diagnosis can be
-        explained by a thin context.
+        go and fetch it. Context supplied on the trigger payload wins over a
+        lookup — that is what makes a run reproducible from a recorded ticket.
+        Anything neither supplied nor fetched is recorded as unavailable rather
+        than quietly absent, so a thin diagnosis can be explained by a thin
+        context instead of looking like a weak agent.
         """
         with ctx.step("enrich") as record:
             ticket = state.get("ticket", {})
             gathered, missing = {}, []
-            for source in ("recent_changes", "past_incidents", "kb_articles"):
-                value = ticket.get(source)
-                if value:
-                    gathered[source] = value
-                else:
-                    missing.append(source)
-            record["output"] = {"gathered": sorted(gathered), "unavailable": missing}
+            for name in ("recent_changes", "past_incidents", "kb_articles"):
+                if ticket.get(name):
+                    gathered[name] = ticket[name]
+            if ctx.source is not None:
+                fetched, unavailable = ctx.source.gather(ticket)
+                for name, value in fetched.items():
+                    gathered.setdefault(name, value)
+                missing = [name for name in unavailable if name not in gathered]
+            else:
+                missing = [name for name in ("recent_changes", "past_incidents",
+                                             "kb_articles") if name not in gathered]
+            record["output"] = {"gathered": sorted(gathered), "unavailable": missing,
+                                "source": "servicenow" if (
+                                    ctx.source is not None and ctx.source.available)
+                                    else "trigger payload only"}
             return {"context": {**gathered, "unavailable_sources": missing}}
 
     def triage(state: RunState) -> dict:
@@ -107,14 +117,16 @@ def build(ctx: RunContext):
         allowed to do it.
         """
         with ctx.step("work_note") as record:
+            ticket = state.get("ticket", {})
             diagnosis = state["outputs"]["diagnostician"]
             proposal = state["outputs"]["remediation_planner"]
             body = _render_work_note(diagnosis, proposal, simulated=ctx.simulated)
-            write = {"target": "servicenow.incident.work_notes",
-                     "ref": state.get("ticket", {}).get("number"),
-                     "dry_run": ctx.dry_run, "body": body, "at": time.time()}
-            record["output"] = {"dry_run": ctx.dry_run, "characters": len(body)}
-            return {"external_writes": [write]}
+            result = ctx.sink.work_note(sys_id=ticket.get("sys_id"),
+                                        number=ticket.get("number"), note=body)
+            record["output"] = {"sent": result.sent, "dry_run": ctx.dry_run,
+                                "characters": len(body)}
+            return {"external_writes": [{**result.as_record(), "at": time.time(),
+                                         "body": body}]}
 
     def gate(state: RunState) -> dict:
         """The human gate.
@@ -123,6 +135,7 @@ def build(ctx: RunContext):
         marked as needing approval. Everything else pauses the run — including,
         deliberately, the case where no threshold is configured.
         """
+        ctx.check("gate")
         proposal = state["outputs"]["remediation_planner"]
         confidence = float(proposal.get("confidence", 0.0))
         threshold = ctx.threshold("remediation_planner")
@@ -169,26 +182,63 @@ def build(ctx: RunContext):
         """Propose-only execution.
 
         There is no automation adapter behind this node, and that is the whole
-        design: the plan goes to a human, and the outcome they report comes back
-        in through the API. When a real executor arrives it plugs in here, behind
-        an approval that already exists.
+        design. The plan goes to a person, and the run pauses a second time
+        until they say what happened. Two pauses, not one, because approving a
+        plan and having run it are different facts and only the second one can
+        justify resolving a ticket.
+
+        When a real executor arrives it plugs in here — behind an approval that
+        already exists and reporting into a field the workflow already reads.
         """
+        ctx.check("hand_off")
+        proposal = state["outputs"]["remediation_planner"]
+        ticket = state.get("ticket", {})
+        payload = {"plan": proposal, "incident": ticket.get("number")}
+        report = interrupt({
+            "kind": "execution_outcome",
+            "summary": f"{ticket.get('number', 'incident')} — plan approved. Run the "
+                       f"{len(proposal.get('steps', []))} steps, then report what happened.",
+            "payload": payload,
+            "payload_hash": canonical_hash(payload),
+            "why": "SignalOps proposes; a person executes and reports back",
+        })
+        succeeded = (report or {}).get("status") == "approved"
         with ctx.step("hand_off") as record:
-            proposal = state["outputs"]["remediation_planner"]
             record["output"] = {"steps": len(proposal.get("steps", [])),
-                                "awaiting": "a human to run the plan and report the outcome"}
-            return {"decisions": [{"node": "hand_off", "decision": "proposed",
-                                   "why": "SignalOps proposes; a person executes"}]}
+                                "reported": "succeeded" if succeeded else "did not resolve it",
+                                "by": (report or {}).get("by")}
+        return {"approval": {**(state.get("approval") or {}),
+                             "execution_outcome": "succeeded" if succeeded else "failed",
+                             "execution_note": (report or {}).get("note")},
+                "decisions": [{"node": "hand_off",
+                               "decision": "executed" if succeeded else "did_not_resolve",
+                               "why": (report or {}).get("note")
+                                      or "reported by the operator who ran it"}]}
 
     def close(state: RunState) -> dict:
+        """Resolve the ticket — only when a human said the plan worked.
+
+        The workflow proposes and a person executes, so nothing here can know
+        the incident is fixed. Closing on approval alone would resolve tickets
+        whose remediation nobody ran. The run therefore ends `awaiting_outcome`
+        unless an operator has reported one.
+        """
         with ctx.step("close") as record:
-            write = {"target": "servicenow.incident.state",
-                     "ref": state.get("ticket", {}).get("number"),
-                     "dry_run": ctx.dry_run, "state": "resolved_pending_human", "at": time.time()}
-            record["output"] = {"dry_run": ctx.dry_run}
-            return {"outcome": "proposed",
-                    "outcome_reason": "plan approved and handed to an operator",
-                    "external_writes": [write]}
+            ticket = state.get("ticket", {})
+            outcome = (state.get("approval") or {}).get("execution_outcome")
+            if outcome != "succeeded":
+                record["output"] = {"resolved": False,
+                                    "waiting_on": "an operator to run the plan and report back"}
+                return {"outcome": "awaiting_outcome",
+                        "outcome_reason": "plan approved and handed over; the ticket stays "
+                                          "open until someone reports the result"}
+            result = ctx.sink.resolve(
+                sys_id=ticket.get("sys_id"), number=ticket.get("number"),
+                close_notes=_render_close_note(state, simulated=ctx.simulated))
+            record["output"] = {"resolved": True, "sent": result.sent, "dry_run": ctx.dry_run}
+            return {"outcome": "resolved",
+                    "outcome_reason": "an operator ran the plan and reported success",
+                    "external_writes": [{**result.as_record(), "at": time.time()}]}
 
     graph = StateGraph(RunState)
     for name, fn in (("enrich", enrich), ("triage", triage), ("out_of_scope", out_of_scope),
@@ -233,6 +283,24 @@ def _render_work_note(diagnosis: dict, proposal: dict, *, simulated: bool) -> st
                   f"     verify: {step.get('verify', '')}",
                   f"     rollback: {step.get('rollback', '')}"]
     lines += ["", "No change has been made. This is a proposal for an operator to execute."]
+    return "\n".join(lines)
+
+
+def _render_close_note(state: RunState, *, simulated: bool) -> str:
+    diagnosis = state["outputs"]["diagnostician"]
+    approval = state.get("approval") or {}
+    lines = []
+    if simulated:
+        lines += ["[SIMULATED — no model was called.]", ""]
+    lines += [
+        "Resolved via SignalOps.",
+        "",
+        f"Cause: {diagnosis.get('root_cause', 'not established')}",
+        f"Plan approved by: {approval.get('by') or 'auto (confidence above threshold)'}",
+        f"Executed and confirmed by: {approval.get('by') or 'operator'}",
+    ]
+    if approval.get("execution_note"):
+        lines += ["", f"Operator note: {approval['execution_note']}"]
     return "\n".join(lines)
 
 

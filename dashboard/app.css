@@ -1484,3 +1484,71 @@ button.status-pill:hover {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* --- onboarding wizard ---------------------------------------------------- */
+
+.wizard {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel, rgba(255, 255, 255, .02));
+}
+
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 12px 14px;
+  list-style: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px 5px 5px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.wizard-step.on {
+  color: var(--text, #e8ecf3);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.wizard-step.done { color: var(--ok); }
+
+.wizard-num {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: 10px;
+}
+
+.wizard-body { padding: 16px 18px; }
+.wizard-body h3 { margin: 0 0 10px; font-size: 15px; }
+
+/* The template card is the one place a user decides what they are signing up
+   for, so it gets more room than a list row. */
+.template-card {
+  padding: 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.template-facts {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}

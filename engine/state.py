@@ -78,11 +78,23 @@ class RunContext:
     specs: dict[str, AgentSpec]
     session_scope: Any
     publish: Any                       # callable(event_type, payload)
+    # External I/O. Both are constructed from the run's dry_run flag, so a node
+    # cannot write live by forgetting to check a flag — in dry run the sink is
+    # holding no client at all.
+    sink: Any = None
+    source: Any = None
     run_budget_usd: float | None = budget_module.DEFAULT_RUN_BUDGET_USD
     spent_usd: float = 0.0
     simulated: bool = field(default=False)
 
     # --- controls ------------------------------------------------------------
+
+    def check(self, node: str) -> None:
+        """Assert the run may continue. Public because the nodes that pause for
+        a human call interrupt() before they open a step, so without an explicit
+        check the kill switch would not be consulted at exactly the boundaries a
+        run spends the most time sitting on."""
+        self._assert_permitted(node)
 
     def _assert_permitted(self, node: str) -> None:
         with self.session_scope() as session:
@@ -107,7 +119,7 @@ class RunContext:
         leaves a persisted step with its error, so a failed run is legible
         afterwards rather than being a gap in the timeline.
         """
-        self._assert_permitted(node)
+        self.check(node)
         record: dict[str, Any] = {"output": None, "input_tokens": 0,
                                   "output_tokens": 0, "cost_usd": 0.0}
         with self.session_scope() as session:

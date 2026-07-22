@@ -99,10 +99,34 @@ class _Harness:
             return [s.node for s in session.query(RunStep)
                     .filter(RunStep.run_id == run_id).order_by(RunStep.started_at).all()]
 
-    def approval(self, run_id: str):
-        from models import Approval
+    def approval(self, run_id: str, node: str = "gate"):
+        from models import Approval, ApprovalStatus
         with self.session_scope() as session:
-            return session.query(Approval).filter(Approval.run_id == run_id).first()
+            return (session.query(Approval)
+                    .filter(Approval.run_id == run_id, Approval.node == node,
+                            Approval.status == ApprovalStatus.pending)
+                    .order_by(Approval.requested_at.desc()).first())
+
+    def await_approval(self, run_id: str, node: str, timeout: float = 15.0):
+        """Poll for the approval itself, not the run status.
+
+        Right after answering the first gate the run is still recorded as
+        awaiting_approval, so waiting on status would return the moment it was
+        called and look at a queue the second gate has not reached yet.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            approval = self.approval(run_id, node=node)
+            if approval is not None:
+                return approval
+            time.sleep(0.05)
+        raise AssertionError(f"run never paused at {node!r}")
+
+    def report_outcome(self, run_id: str, *, succeeded: bool, note: str | None = None):
+        """Answer the second gate: an operator saying what running it did."""
+        approval = self.await_approval(run_id, "hand_off")
+        self.engine.decide(approval_id=approval.id, approved=succeeded, actor="oli",
+                           actor_id=None, note=note)
 
 
 class SchemaIntegrityTests(unittest.TestCase):
@@ -214,6 +238,8 @@ class RunLifecycleTests(unittest.TestCase):
         self.assertTrue(approval.payload_hash)
         harness.engine.decide(approval_id=approval.id, approved=True, actor="ada",
                               actor_id=None)
+        # Second gate: approving a plan is not the same as having run it.
+        harness.report_outcome(run_id, succeeded=True)
         harness.wait(run_id, "succeeded")
         self.assertEqual(harness.steps(run_id),
                          ["enrich", "triage", "diagnose", "plan", "work_note",
@@ -229,6 +255,7 @@ class RunLifecycleTests(unittest.TestCase):
         before = harness.steps(run_id)
         harness.engine.decide(approval_id=harness.approval(run_id).id, approved=True,
                               actor="ada", actor_id=None)
+        harness.report_outcome(run_id, succeeded=True)
         harness.wait(run_id, "succeeded")
         after = harness.steps(run_id)
         self.assertEqual(after[:len(before)], before)
@@ -298,9 +325,12 @@ class RoutingTests(unittest.TestCase):
                                     requires_approval=False, confidence_threshold=0.8))
         run_id = harness.engine.start(workflow_id=harness.workflow_id, ticket=dict(TICKET),
                                       actor="tester")
+        # It clears the confidence gate without asking, then still stops to be
+        # told what happened — the plan gate is skippable, execution is not.
+        harness.report_outcome(run_id, succeeded=True)
         harness.wait(run_id, "succeeded")
         self.assertIn("hand_off", harness.steps(run_id))
-        self.assertIsNone(harness.approval(run_id))
+        self.assertIsNone(harness.approval(run_id, node="gate"))
 
     def test_low_confidence_always_escalates(self):
         from models import AgentConfig
@@ -352,6 +382,8 @@ class ControlTests(unittest.TestCase):
         run = harness.wait(run_id, "cancelled")
         self.assertIn("kill switch", run.error)
         self.assertNotIn("close", harness.steps(run_id))
+        # It halted at the hand-off boundary, before pausing for a report.
+        self.assertIsNone(harness.approval(run_id, node="hand_off"))
 
     def test_an_exhausted_budget_halts_the_run(self):
         harness = _Harness(self, budget=0.01)
@@ -395,6 +427,8 @@ class DurabilityTests(unittest.TestCase):
         self.addCleanup(lambda: restarted.shutdown(drain=True))
         restarted.decide(approval_id=harness.approval(run_id).id, approved=True,
                          actor="ada", actor_id=None)
+        second = harness.await_approval(run_id, "hand_off")
+        restarted.decide(approval_id=second.id, approved=True, actor="oli", actor_id=None)
         harness.wait(run_id, "succeeded")
         after = harness.steps(run_id)
         # It continued from the checkpoint rather than starting over.

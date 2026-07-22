@@ -117,6 +117,7 @@ const VIEW_RENDERERS = {
   workflows: renderWorkflows,
   runs: renderRuns,
   approvals: renderApprovals,
+  connections: renderConnections,
 };
 
 function switchView(view) {
@@ -125,6 +126,309 @@ function switchView(view) {
   renderNav();
   const render = VIEW_RENDERERS[view];
   return render ? render() : renderPlaceholder(view);
+}
+
+// --- onboarding wizard ------------------------------------------------------
+
+// Six steps, and the fifth is the one that matters: Enable is not offered
+// until a dry run has succeeded, so you always see what a workflow would do
+// before it is able to do anything.
+const WIZARD_STEPS = [
+  { id: 'template', label: 'Template' },
+  { id: 'connect', label: 'Connect' },
+  { id: 'configure', label: 'Configure' },
+  { id: 'agents', label: 'Review agents' },
+  { id: 'dryrun', label: 'Dry run' },
+  { id: 'enable', label: 'Enable' },
+];
+
+const wizard = { step: 0, workflowId: null, dismissed: false, active: false, runId: null };
+
+function startWizard() {
+  Object.assign(wizard, { step: 0, workflowId: null, dismissed: false, active: true, runId: null });
+  switchView('workflows');
+}
+
+function dismissWizard() {
+  wizard.dismissed = true;
+  wizard.active = false;
+  renderWorkflows();
+}
+
+async function renderWizard(data) {
+  const existing = data.workflows[0] || null;
+  if (existing && !wizard.workflowId) wizard.workflowId = existing.id;
+  const workflow = data.workflows.find(w => w.id === wizard.workflowId) || existing;
+  const step = WIZARD_STEPS[wizard.step];
+  el('view').innerHTML = `
+    <div class="wizard">
+      <ol class="wizard-steps">
+        ${WIZARD_STEPS.map((s, i) => `
+          <li class="wizard-step ${i === wizard.step ? 'on' : ''} ${i < wizard.step ? 'done' : ''}">
+            <span class="wizard-num">${i + 1}</span>${esc(s.label)}</li>`).join('')}
+      </ol>
+      <div class="wizard-body" id="wizard-body"><div class="empty">Loading…</div></div>
+    </div>
+    <p class="row-actions">
+      <button class="button ghost" onclick="dismissWizard()">Skip setup and see the list</button>
+    </p>`;
+  const render = {
+    template: wizardTemplate, connect: wizardConnect, configure: wizardConfigure,
+    agents: wizardAgents, dryrun: wizardDryRun, enable: wizardEnable,
+  }[step.id];
+  await render(workflow);
+}
+
+function wizardNav(backLabel, nextLabel, nextAction, { nextDisabled = false, note = '' } = {}) {
+  return `
+    <p class="row-actions">
+      ${wizard.step > 0 ? `<button class="button ghost" onclick="wizardBack()">${
+        esc(backLabel)}</button>` : ''}
+      ${nextLabel ? `<button class="button" onclick="${nextAction}" ${
+        nextDisabled ? 'disabled' : ''}>${esc(nextLabel)}</button>` : ''}
+    </p>
+    ${note ? `<p class="field-hint">${note}</p>` : ''}`;
+}
+
+function wizardBack() { wizard.step = Math.max(0, wizard.step - 1); renderWorkflows(); }
+function wizardNext() { wizard.step = Math.min(WIZARD_STEPS.length - 1, wizard.step + 1); renderWorkflows(); }
+
+function wizardTemplate(workflow) {
+  el('wizard-body').innerHTML = `
+    <h3>What should this workflow do?</h3>
+    <div class="template-card">
+      <strong>Incident remediation</strong>
+      <p class="agent-purpose">Takes an incident from ServiceNow, gathers the recent changes
+        and past incidents around it, forms a root-cause hypothesis, writes a proposed
+        remediation plan back to the ticket, and asks a human before anything else.</p>
+      <ul class="template-facts">
+        <li><strong>Touches:</strong> ServiceNow — reads incidents, changes and knowledge
+          articles; appends a work note; can resolve a ticket.</li>
+        <li><strong>Will do unattended:</strong> read, diagnose, and write a work note
+          describing what it proposes.</li>
+        <li><strong>Will never do unattended:</strong> execute a remediation. It proposes;
+          a person runs the steps and reports back.</li>
+      </ul>
+    </div>
+    <label for="wz-name">Name</label>
+    <input id="wz-name" class="draft-field" value="${esc(workflow ? workflow.name
+      : 'Incident remediation')}" />
+    ${wizardNav('Back', workflow ? 'Next' : 'Create and continue', 'wizardCreate()')}`;
+}
+
+async function wizardCreate() {
+  const name = el('wz-name').value.trim() || 'Incident remediation';
+  if (!wizard.workflowId) {
+    const response = await fetch('/api/workflows', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template: 'incident_remediation', name, dry_run: true }),
+    });
+    if (!response.ok) return toast((await response.json()).detail || 'could not create', false);
+    wizard.workflowId = (await response.json()).id;
+  }
+  wizardNext();
+}
+
+async function wizardConnect() {
+  const data = await (await fetch('/api/connections')).json();
+  const rows = Object.entries(data.environment).map(([name, present]) => `
+    <div class="audit-row">
+      <span class="audit-actor"><code>${esc(name)}</code></span>
+      <span class="tier-badge ${present ? 'ok' : 'bad'}">${present ? 'set' : 'missing'}</span>
+    </div>`).join('');
+  el('wizard-body').innerHTML = `
+    <h3>Connect ServiceNow</h3>
+    <p class="agent-purpose">SignalOps reads credentials from the environment and never
+      stores them. There is no field here to type a password into — set these where the
+      server runs, then test.</p>
+    ${rows}
+    <p class="field-hint">Reads need the instance URL and the read account. Writing work
+      notes needs the write account as well; without it the workflow still runs and records
+      what it would have written.</p>
+    <p class="row-actions">
+      <button class="button ghost" onclick="testConnection()">Test connection</button>
+    </p>
+    <p id="conn-result" class="field-hint"></p>
+    ${wizardNav('Back', 'Next', 'wizardNext()', {
+      note: data.missing_for_reads.length
+        ? 'You can continue without credentials — the workflow will run on tickets you paste in.'
+        : '' })}`;
+}
+
+async function testConnection() {
+  const target = el('conn-result');
+  target.textContent = 'Testing…';
+  const result = await (await fetch('/api/connections/test', { method: 'POST' })).json();
+  target.innerHTML = result.ok
+    ? `<span class="tier-badge ok">connected</span> ${esc(result.detail)}${
+        result.writes_available ? '' : ' Write credentials are not set, so work notes will be recorded rather than sent.'}`
+    : `<span class="tier-badge bad">failed</span> ${esc(result.detail)}`;
+}
+
+function wizardConfigure(workflow) {
+  const config = (workflow && workflow.config) || {};
+  el('wizard-body').innerHTML = `
+    <h3>How should it run?</h3>
+    <label for="wz-filter">Which incidents (ServiceNow encoded query)</label>
+    <input id="wz-filter" class="draft-field" placeholder="active=true^priority<=2^assignment_group=InfraSupport"
+      value="${esc(config.filter_query || '')}" />
+    <p class="field-hint">Leave empty to start runs by hand instead of polling.</p>
+
+    <label for="wz-interval">Poll every (seconds)</label>
+    <input id="wz-interval" class="draft-field" type="number" min="30" max="3600" step="30"
+      value="${config.poll_interval_seconds || 120}" />
+
+    <label for="wz-budget">Budget per run (USD)</label>
+    <input id="wz-budget" class="draft-field" type="number" min="0.25" max="100" step="0.25"
+      value="${config.run_budget_usd ?? 1}" />
+    <p class="field-hint">A hard stop, not a warning. A run that reaches it is cancelled.</p>
+
+    <div class="field-row">
+      <label class="switch"><input type="checkbox" checked disabled /><span>Dry run</span></label>
+      <span class="field-hint">Locked on until a dry run has succeeded. External writes are
+        composed and recorded, and nothing leaves the process.</span>
+    </div>
+    ${wizardNav('Back', 'Save and continue', 'wizardSaveConfig()')}`;
+}
+
+async function wizardSaveConfig() {
+  const response = await fetch(`/api/workflows/${wizard.workflowId}/config`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filter_query: el('wz-filter').value.trim(),
+      poll_interval_seconds: Number(el('wz-interval').value) || 120,
+      run_budget_usd: Number(el('wz-budget').value) || 1,
+    }),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not save', false);
+  wizardNext();
+}
+
+async function wizardAgents() {
+  const data = await (await fetch('/api/agents')).json();
+  const mine = data.agents.filter(a => ['incident_remediation', 'both'].includes(a.workflow));
+  el('wizard-body').innerHTML = `
+    <h3>These agents will run</h3>
+    <p class="agent-purpose">Every agent that can act on your tickets, with the model it uses
+      and how far it can reach. Nothing else runs — there are no hidden actors.</p>
+    ${mine.map(a => `
+      <div class="audit-row">
+        <span class="audit-actor">${esc(a.name)}</span>
+        <span class="tier-badge tier-${esc(a.tier)}">${esc(a.tier.replace('_', ' '))}</span>
+        <span><code>${esc(a.model)}</code></span>
+        <span class="dialog-note">${a.tools.length ? esc(a.tools.join(', ')) : 'no tools'}</span>
+        ${a.enabled ? '' : '<span class="tier-badge bad">disabled</span>'}
+      </div>`).join('')}
+    <p class="field-hint">Change any of these later under Configure → Agents. Tools and tier
+      are fixed in code and are not editable there.</p>
+    ${wizardNav('Back', 'Next', 'wizardNext()')}`;
+}
+
+async function wizardDryRun(workflow) {
+  const passed = workflow && workflow.dry_run_passed_at;
+  el('wizard-body').innerHTML = `
+    <h3>Run it once, writing nothing</h3>
+    <p class="agent-purpose">This executes the whole workflow against a real incident. The
+      work note is composed and recorded but not sent. You cannot enable the workflow until
+      this succeeds.</p>
+    ${passed ? `<p class="field-hint"><span class="tier-badge ok">passed</span>
+      Dry run succeeded ${new Date(passed * 1000).toLocaleString()}.</p>` : ''}
+    <label for="wz-ticket">Incident (JSON)</label>
+    <textarea id="wz-ticket" class="draft-field prompt-field" rows="12">${
+      esc(JSON.stringify({ ...SAMPLE_TICKET, number: 'INC' + Math.floor(Math.random() * 9e6 + 1e6) }, null, 2))}</textarea>
+    <p class="row-actions">
+      <button class="button" onclick="wizardStartDryRun()">Start the dry run</button>
+    </p>
+    <div id="wz-run-status"></div>
+    ${wizardNav('Back', 'Next', 'wizardNext()', { nextDisabled: !passed,
+      note: passed ? '' : 'Next unlocks once a dry run has completed a work note.' })}`;
+}
+
+async function wizardStartDryRun() {
+  let ticket;
+  try {
+    ticket = JSON.parse(el('wz-ticket').value);
+  } catch (error) {
+    return toast('That is not valid JSON: ' + error.message, false);
+  }
+  el('wz-run-status').innerHTML = '<p class="field-hint">Running…</p>';
+  const response = await fetch(`/api/workflows/${wizard.workflowId}/runs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, dry_run: true }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    const detail = body.detail;
+    return toast((detail && detail.message) || detail || 'could not start', false);
+  }
+  wizard.runId = body.run_id;
+  pollDryRun();
+}
+
+async function pollDryRun() {
+  const run = await (await fetch(`/api/runs/${wizard.runId}`)).json();
+  el('wz-run-status').innerHTML = `
+    ${run.steps.map(s => `
+      <div class="audit-row">
+        <span class="audit-actor">${esc(s.node)}</span>
+        <span class="tier-badge ${s.status === 'succeeded' ? 'ok'
+          : s.status === 'failed' ? 'bad' : 'warn'}">${esc(s.status)}</span>
+        ${s.error ? `<span>${esc(s.error)}</span>` : ''}
+      </div>`).join('')}`;
+  const done = ['succeeded', 'failed', 'cancelled', 'awaiting_approval'].includes(run.status);
+  if (!done) return setTimeout(pollDryRun, 700);
+  const wrote = run.steps.some(s => s.node === 'work_note' && s.status === 'succeeded');
+  el('wz-run-status').insertAdjacentHTML('beforeend', wrote
+    ? `<p class="field-hint"><span class="tier-badge ok">dry run passed</span>
+       The work note below was composed and <strong>not sent</strong>.</p>
+       <pre class="prompt-view">${esc(dryRunNote(run))}</pre>`
+    : `<p class="field-hint"><span class="tier-badge bad">dry run failed</span>
+       ${esc(run.error || 'the run did not reach the work note')}</p>`);
+  // Unlock Next in place rather than re-rendering the step. Re-rendering would
+  // wipe the work note that has just been printed, which is the one thing this
+  // step exists to show you.
+  if (wrote) {
+    const next = [...document.querySelectorAll('.wizard-body button')]
+      .find(b => b.textContent.trim() === 'Next');
+    if (next) next.disabled = false;
+  }
+}
+
+function dryRunNote(run) {
+  const step = run.steps.find(s => s.node === 'work_note');
+  return (step && step.output && JSON.stringify(step.output, null, 2)) || '';
+}
+
+async function wizardEnable(workflow) {
+  const canEnable = workflow && workflow.can_enable;
+  el('wizard-body').innerHTML = `
+    <h3>Turn it on</h3>
+    <p class="agent-purpose">Enabling lets the workflow run on its own. It still proposes
+      rather than acts, and it still pauses for a human before anything is handed over.</p>
+    ${canEnable ? '' : `<div class="pipeline-note"><strong>Not yet.</strong> A dry run has to
+      succeed first — go back a step and run one.</div>`}
+    <div class="field-row">
+      <label class="switch"><input type="checkbox" id="wz-poll" ${
+        workflow && workflow.polling ? 'checked' : ''} /><span>Poll ServiceNow automatically</span></label>
+      <span class="field-hint">Off means runs are started by hand.</span>
+    </div>
+    <p class="row-actions">
+      <button class="button ghost" onclick="wizardBack()">Back</button>
+      <button class="button" onclick="wizardDoEnable()" ${canEnable ? '' : 'disabled'}>
+        Enable workflow</button>
+    </p>`;
+}
+
+async function wizardDoEnable() {
+  const response = await fetch(`/api/workflows/${wizard.workflowId}/enable`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: true, poll_enabled: el('wz-poll').checked }),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not enable', false);
+  wizard.dismissed = true;
+  wizard.active = false;
+  toast('Workflow enabled');
+  renderWorkflows();
 }
 
 // --- workflows --------------------------------------------------------------
@@ -148,6 +452,13 @@ async function renderWorkflows() {
   } catch {
     el('view').innerHTML = '<div class="empty">Workflows could not be loaded.</div>';
     return;
+  }
+  // A fresh workspace lands on the wizard, not on an empty list — an empty
+  // dashboard tells you nothing about what to do next. `active` is separate
+  // from that so Set up can re-enter the wizard on a workflow that is already
+  // enabled, which is exactly when someone wants to change its filter.
+  if (wizard.active || (!data.workflows.some(w => w.enabled) && !wizard.dismissed)) {
+    return renderWizard(data);
   }
   const isAdmin = principal.role === 'admin';
   const canRun = ['operator', 'approver', 'admin'].includes(principal.role);
@@ -174,12 +485,16 @@ function workflowCard(w, canRun) {
       <div class="agent-top">
         <strong>${esc(w.name)}</strong>
         <span class="tier-badge">${esc(w.template.replace(/_/g, ' '))}</span>
+        <span class="tier-badge ${w.enabled ? 'ok' : ''}">${w.enabled ? 'enabled' : 'not enabled'}</span>
         ${w.config.dry_run ? '<span class="tier-badge">dry run</span>' : ''}
+        ${w.polling ? '<span class="tier-badge warn">polling</span>' : ''}
       </div>
       <p class="agent-purpose">Budget $${(w.config.run_budget_usd ?? 1).toFixed(2)} per run.
         ${w.config.dry_run ? 'External writes are recorded, not sent.'
-          : 'External writes are live.'}</p>
+          : 'External writes are live.'}
+        ${w.can_enable ? '' : ' No dry run has succeeded yet, so it cannot be enabled.'}</p>
       <div class="row-actions">
+        <button class="button ghost" onclick="resumeWizard('${w.id}')">Set up</button>
         <button class="button" onclick="openRunDialog('${w.id}')" ${canRun ? '' : 'disabled'}
           title="${canRun ? 'Start a run' : 'Starting a run requires the operator role'}">
           Start a run</button>
@@ -190,6 +505,11 @@ function workflowCard(w, canRun) {
 }
 
 function exportWorkflow(id) { window.location = `/api/workflows/${id}/export`; }
+
+function resumeWizard(workflowId) {
+  Object.assign(wizard, { step: 1, workflowId, dismissed: false, active: true });
+  renderWorkflows();
+}
 
 function openWorkflowDialog() {
   showDialog('New workflow', `
@@ -347,19 +667,38 @@ async function renderApprovals() {
       : '<div class="empty">Nothing is waiting on a human.</div>'}`;
 }
 
+// The two gates ask different questions, so they get different buttons.
+// Labelling "did running it work?" as Approve/Reject would invite someone to
+// approve a plan they never ran, which is the one thing that can resolve a
+// ticket that is not actually fixed.
+const GATE_COPY = {
+  gate: { yes: 'Approve', no: 'Reject', ask: 'Approve this plan',
+          notePrompt: { yes: 'Note (optional)', no: 'Why are you rejecting it?' } },
+  hand_off: { yes: 'It worked', no: 'It did not resolve it',
+              ask: 'Report what happened when you ran it',
+              notePrompt: { yes: 'What did you do? (optional)',
+                            no: 'What happened?' } },
+};
+
 function approvalCard(approval, canDecide) {
+  const copy = GATE_COPY[approval.node] || GATE_COPY.gate;
   const plan = (approval.payload && approval.payload.plan) || {};
   const diagnosis = (approval.payload && approval.payload.diagnosis) || {};
   const steps = plan.steps || [];
+  const awaitingReport = approval.node === 'hand_off';
   return `
     <div class="agent-item">
       <div class="agent-top">
         <strong>${esc(approval.summary)}</strong>
+        ${awaitingReport ? '<span class="tier-badge warn">awaiting your report</span>' : ''}
         ${approval.payload && approval.payload.simulated
           ? '<span class="tier-badge warn">simulated</span>' : ''}
       </div>
-      <p class="agent-purpose"><strong>Cause:</strong> ${esc(diagnosis.root_cause || 'not established')}
-        (${Math.round((diagnosis.confidence || 0) * 100)}% confident)</p>
+      ${diagnosis.root_cause ? `<p class="agent-purpose"><strong>Cause:</strong>
+        ${esc(diagnosis.root_cause)}
+        (${Math.round((diagnosis.confidence || 0) * 100)}% confident)</p>` : ''}
+      ${awaitingReport ? `<p class="agent-purpose">This plan was approved. Run the steps,
+        then say what happened — the ticket is only resolved if you report success.</p>` : ''}
       <ol class="plan-steps">
         ${steps.map(step => `<li><strong>${esc(step.action || '')}</strong>
           <br /><span class="dialog-note">verify: ${esc(step.verify || '')}</span>
@@ -367,17 +706,19 @@ function approvalCard(approval, canDecide) {
       </ol>
       <p class="dialog-note">Pinned to ${esc(approval.payload_hash.slice(0, 12))}…</p>
       <div class="row-actions">
-        <button class="button" onclick="decide('${approval.id}', true)" ${canDecide ? '' : 'disabled'}
-          title="${canDecide ? 'Approve this plan' : 'Deciding requires the approver role'}">
-          Approve</button>
-        <button class="button ghost" onclick="decide('${approval.id}', false)"
-          ${canDecide ? '' : 'disabled'}>Reject</button>
+        <button class="button" onclick="decide('${approval.id}', true, '${approval.node}')"
+          ${canDecide ? '' : 'disabled'}
+          title="${canDecide ? esc(copy.ask) : 'Deciding requires the approver role'}">
+          ${esc(copy.yes)}</button>
+        <button class="button ghost" onclick="decide('${approval.id}', false, '${approval.node}')"
+          ${canDecide ? '' : 'disabled'}>${esc(copy.no)}</button>
       </div>
     </div>`;
 }
 
-async function decide(approvalId, approved) {
-  const note = window.prompt(approved ? 'Note (optional)' : 'Why are you rejecting it?') ?? '';
+async function decide(approvalId, approved, node) {
+  const copy = GATE_COPY[node] || GATE_COPY.gate;
+  const note = window.prompt(approved ? copy.notePrompt.yes : copy.notePrompt.no) ?? '';
   const response = await fetch(`/api/approvals/${approvalId}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ approved, note: note || null }),
@@ -627,6 +968,52 @@ async function resetAgent(id) {
   if (!confirm(`Reset ${id} to its shipped defaults?`)) return;
   await fetch(`/api/agents/${id}/reset`, { method: 'POST' });
   renderAgents();
+}
+
+// --- connections ------------------------------------------------------------
+
+async function renderConnections() {
+  el('view').innerHTML = '<div class="empty">Loading…</div>';
+  let data;
+  try {
+    data = await (await fetch('/api/connections')).json();
+  } catch {
+    el('view').innerHTML = '<div class="empty">Connections could not be loaded.</div>';
+    return;
+  }
+  const canTest = principal.role !== 'viewer';
+  el('view').innerHTML = `
+    <div class="pipeline-note">
+      Credentials live in the environment where the server runs and are never stored by
+      SignalOps. This page reports whether each variable is <em>set</em> — it has no way to
+      show you a value, and no field to type one into.
+    </div>
+    <div class="agent-item">
+      <div class="agent-top">
+        <strong>ServiceNow</strong>
+        <span class="tier-badge ${data.missing_for_reads.length ? 'bad' : 'ok'}">
+          ${data.missing_for_reads.length ? 'reads unavailable' : 'reads ready'}</span>
+        <span class="tier-badge ${data.missing_for_writes.length ? '' : 'ok'}">
+          ${data.missing_for_writes.length ? 'writes unavailable' : 'writes ready'}</span>
+      </div>
+      ${Object.entries(data.environment).map(([name, present]) => `
+        <div class="audit-row">
+          <span class="audit-actor"><code>${esc(name)}</code></span>
+          <span class="tier-badge ${present ? 'ok' : 'bad'}">${present ? 'set' : 'missing'}</span>
+        </div>`).join('')}
+      <p class="field-hint">Reads use a separate account from writes on purpose: the write
+        account needs only enough permission to append a work note and set a state, so what
+        the workflow can do is bounded by the credential and not only by the prompt.</p>
+      ${data.missing_for_writes.length && !data.missing_for_reads.length ? `
+        <p class="field-hint">Without write credentials the workflow still runs end to end and
+        records the work note it would have posted.</p>` : ''}
+      <div class="row-actions">
+        <button class="button ghost" onclick="testConnection()" ${canTest ? '' : 'disabled'}
+          title="${canTest ? 'Test the read credentials' : 'Testing requires the operator role'}">
+          Test connection</button>
+      </div>
+      <p id="conn-result" class="field-hint"></p>
+    </div>`;
 }
 
 // --- feedback ---------------------------------------------------------------

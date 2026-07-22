@@ -39,6 +39,7 @@ from engine.approvals import StaleApproval, canonical_hash
 from engine.budget import DEFAULT_RUN_BUDGET_USD, BudgetExceeded
 from engine.llm import ModelCallFailed, build_client
 from engine.state import Halted, RunContext
+from integrations.servicenow import ContextSource, TicketSink
 from events import Event, bus
 from models import AgentConfig, Approval, ApprovalStatus, Run, RunStatus, Workflow, Workspace
 
@@ -72,7 +73,8 @@ class DuplicateRun(EngineError):
 
 
 class Engine:
-    def __init__(self, *, client=None, checkpoint_path: Path | None = None) -> None:
+    def __init__(self, *, client=None, checkpoint_path: Path | None = None,
+                 sink_factory=None, source_factory=None) -> None:
         path = Path(checkpoint_path or CHECKPOINT_PATH)
         path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False because runs execute on the pool; SqliteSaver
@@ -81,6 +83,10 @@ class Engine:
         self.checkpointer = SqliteSaver(self._connection)
         self.checkpointer.setup()
         self._client = client
+        # Injectable so tests can exercise the write path without a ServiceNow
+        # instance, and so phase 4 can register a different sink.
+        self._sink_factory = sink_factory or (lambda *, dry_run: TicketSink(dry_run=dry_run))
+        self._source_factory = source_factory or ContextSource
         self._pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS,
                                         thread_name_prefix="signalops-run")
         self._lock = threading.Lock()
@@ -189,7 +195,9 @@ class Engine:
                           dry_run=dry_run, actor=actor, actor_verified=actor_verified,
                           client=self.client, agents=agents, specs=specs,
                           session_scope=session_scope, publish=self._publish,
-                          run_budget_usd=budget)
+                          run_budget_usd=budget,
+                          sink=self._sink_factory(dry_run=dry_run),
+                          source=self._source_factory())
 
     # --- driving -------------------------------------------------------------
 
@@ -223,8 +231,9 @@ class Engine:
     def _pause(self, context: RunContext, pending) -> None:
         """Record the approval the graph is waiting on."""
         request = pending[0].value if hasattr(pending[0], "value") else pending[0]
+        node = "hand_off" if request.get("kind") == "execution_outcome" else "gate"
         with session_scope() as session:
-            approval = Approval(run_id=context.run_id, node="gate",
+            approval = Approval(run_id=context.run_id, node=node,
                                 summary=request.get("summary", "approval required"),
                                 payload=request.get("payload", {}),
                                 payload_hash=request.get("payload_hash", ""),
@@ -235,11 +244,17 @@ class Engine:
             run = session.get(Run, context.run_id)
             run.status = RunStatus.awaiting_approval
             run.cost_usd = context.spent_usd
+            passed = _mark_dry_run_passed(session, run)
+            if passed:
+                audit(session, actor="engine", action="dry_run_passed",
+                      entity_type="workflow", entity_id=run.workflow_id,
+                      workspace_id=context.workspace_id, detail={"run_id": run.id})
             audit(session, actor="engine", action="approval_requested", entity_type="run",
                   entity_id=context.run_id, workspace_id=context.workspace_id,
-                  detail={"approval_id": approval_id, "why": request.get("why")})
+                  detail={"approval_id": approval_id, "node": node,
+                          "why": request.get("why")})
         self._publish("approval_requested",
-                      {"run_id": context.run_id, "approval_id": approval_id,
+                      {"run_id": context.run_id, "approval_id": approval_id, "node": node,
                        "summary": request.get("summary"), "why": request.get("why"),
                        "confidence": request.get("confidence"),
                        "threshold": request.get("threshold")})
@@ -251,6 +266,10 @@ class Engine:
             run.status = RunStatus.succeeded
             run.finished_at = time.time()
             run.cost_usd = context.spent_usd
+            if _mark_dry_run_passed(session, run):
+                audit(session, actor="engine", action="dry_run_passed",
+                      entity_type="workflow", entity_id=run.workflow_id,
+                      workspace_id=context.workspace_id, detail={"run_id": run.id})
             audit(session, actor="engine", action="run_finished", entity_type="run",
                   entity_id=context.run_id, workspace_id=context.workspace_id,
                   detail={"outcome": outcome, "cost_usd": round(context.spent_usd, 6),
@@ -411,6 +430,30 @@ class Engine:
 
     def _publish(self, event_type: str, payload: dict) -> None:
         bus.publish_threadsafe(Event(event_type, payload))
+
+
+def _mark_dry_run_passed(session, run) -> bool:
+    """Stamp the workflow once a dry run has proven the wiring.
+
+    "Proven" means the run reached a completed work note: the connection
+    resolved, every required agent produced a valid answer, and the external
+    write was composed. That is the whole path onboarding needs to trust, and
+    stopping there matters — a dry run must not require someone to also approve
+    a plan and report an outcome for a ticket nobody intends to act on.
+    """
+    from models import RunStep, Workflow
+    if not run.dry_run:
+        return False
+    workflow = session.get(Workflow, run.workflow_id)
+    if workflow is None or workflow.dry_run_passed_at:
+        return False
+    reached = (session.query(RunStep)
+               .filter(RunStep.run_id == run.id, RunStep.node == "work_note",
+                       RunStep.status == "succeeded").first())
+    if reached is None:
+        return False
+    workflow.dry_run_passed_at = time.time()
+    return True
 
 
 def _configs(session, workspace_id: str) -> dict:

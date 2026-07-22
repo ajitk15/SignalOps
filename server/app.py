@@ -38,10 +38,12 @@ from engine import workflow_export  # noqa: E402
 from engine.approvals import StaleApproval  # noqa: E402
 from engine.runtime import (TEMPLATES, DuplicateRun, EngineError,  # noqa: E402
                             engine)
+from engine.poller import poller  # noqa: E402
 from engine.state import Halted  # noqa: E402
+from integrations import servicenow  # noqa: E402
 from events import Event, bus  # noqa: E402
-from models import (AgentConfig, Approval, ApprovalStatus, Role, Run,  # noqa: E402
-                    RunStatus, RunStep, Workflow, Workspace)
+from models import (AgentConfig, Approval, ApprovalStatus, Connection,  # noqa: E402
+                    Role, Run, RunStatus, RunStep, Workflow, Workspace)
 
 # Which tools sit at each tier — shown in the UI so the envelope is legible.
 TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
@@ -90,16 +92,18 @@ async def on_startup() -> None:
     resumed = engine().reconcile()
     if resumed:
         logger.info("resumed %d run(s) left in flight by the previous process", resumed)
+    await poller.sync()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    poller.stop_all()
     engine().shutdown()
 
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "env": ENV, "phase": "2",
+    return {"status": "ok", "env": ENV, "phase": "3",
             "auth_provider": provider().name,
             "identity_verified": provider().verifies_identity,
             # Whether the engine will call a model or simulate. Surfaced so a
@@ -348,7 +352,11 @@ def _workflow_view(workflow: Workflow) -> dict:
             "config": workflow.config, "enabled": workflow.enabled,
             "dry_run_passed_at": workflow.dry_run_passed_at,
             "created_at": workflow.created_at,
-            "exportable": workflow.template in workflow_export.TEMPLATES}
+            "exportable": workflow.template in workflow_export.TEMPLATES,
+            "polling": bool(workflow.config.get("poll_enabled")),
+            # The UI needs to explain *why* Enable is unavailable, not just
+            # grey it out.
+            "can_enable": bool(workflow.dry_run_passed_at)}
 
 
 @app.get("/api/workflows")
@@ -411,6 +419,136 @@ async def export_workflow(workflow_id: str,
               detail={"bytes": len(archive)})
     return Response(content=archive, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+class EnableRequest(BaseModel):
+    enabled: bool
+    poll_enabled: bool = False
+
+
+@app.post("/api/workflows/{workflow_id}/enable")
+async def enable_workflow(workflow_id: str, payload: EnableRequest,
+                          principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    """Turn a workflow on — but not before a dry run has succeeded.
+
+    The gate is server-side rather than a disabled button, because a disabled
+    button is a suggestion. Onboarding's whole claim is that you see what a
+    workflow *would* do before it can do anything, and that only holds if the
+    enable path itself refuses.
+    """
+    with session_scope() as session:
+        workflow = session.get(Workflow, workflow_id)
+        if workflow is None or workflow.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown workflow")
+        if payload.enabled and not workflow.dry_run_passed_at:
+            raise HTTPException(
+                status_code=409,
+                detail="This workflow has not completed a dry run yet. Run one first: "
+                       "it executes against a real ticket and writes nothing.")
+        workflow.enabled = payload.enabled
+        workflow.config = {**workflow.config, "poll_enabled": payload.poll_enabled}
+        audit(session, actor=principal.user.display_name,
+              action="workflow_enabled" if payload.enabled else "workflow_disabled",
+              entity_type="workflow", entity_id=workflow_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"polling": payload.poll_enabled})
+        view = _workflow_view(workflow)
+    await poller.sync()
+    return view
+
+
+class WorkflowConfigRequest(BaseModel):
+    filter_query: str | None = Field(default=None, max_length=1000)
+    poll_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
+    dry_run: bool | None = None
+    run_budget_usd: float | None = Field(default=None, gt=0, le=100)
+
+
+@app.put("/api/workflows/{workflow_id}/config")
+async def configure_workflow(workflow_id: str, payload: WorkflowConfigRequest,
+                             principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        workflow = session.get(Workflow, workflow_id)
+        if workflow is None or workflow.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown workflow")
+        changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+        if changes.get("dry_run") is False and not workflow.dry_run_passed_at:
+            raise HTTPException(
+                status_code=409,
+                detail="Leave dry run on until a dry run has succeeded.")
+        workflow.config = {**workflow.config, **changes}
+        audit(session, actor=principal.user.display_name, action="workflow_configured",
+              entity_type="workflow", entity_id=workflow_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified, detail=changes)
+        view = _workflow_view(workflow)
+    return view
+
+
+# --- connections -------------------------------------------------------------
+
+class ConnectionRequest(BaseModel):
+    """No credential fields, deliberately.
+
+    Secrets come from the environment. A form that accepted a password and
+    promised not to store it would be a weaker guarantee than a form that has
+    nowhere to put one.
+    """
+    kind: str = "servicenow"
+    name: str = Field(min_length=1, max_length=80)
+    filter_query: str = Field(default="", max_length=1000)
+
+
+@app.get("/api/connections")
+async def list_connections(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        rows = [{"id": c.id, "kind": c.kind, "name": c.name, "config": c.config,
+                 "enabled": c.enabled}
+                for c in session.query(Connection)
+                .filter(Connection.workspace_id == principal.workspace_id).all()]
+    return {
+        "connections": rows,
+        # Presence only. Values are never returned, and there is no endpoint
+        # that would return them.
+        "environment": servicenow.env_status(),
+        "missing_for_reads": servicenow.missing_env(for_writes=False),
+        "missing_for_writes": servicenow.missing_env(for_writes=True),
+    }
+
+
+@app.post("/api/connections")
+async def create_connection(payload: ConnectionRequest,
+                            principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        connection = Connection(workspace_id=principal.workspace_id, kind=payload.kind,
+                                name=payload.name,
+                                config={"filter_query": payload.filter_query})
+        session.add(connection)
+        session.flush()
+        audit(session, actor=principal.user.display_name, action="connection_created",
+              entity_type="connection", entity_id=connection.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"kind": payload.kind, "name": payload.name})
+        view = {"id": connection.id, "kind": connection.kind, "name": connection.name,
+                "config": connection.config, "enabled": connection.enabled}
+    return view
+
+
+@app.post("/api/connections/test")
+async def test_connection(principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """Prove the credentials work before a workflow depends on them."""
+    missing = servicenow.missing_env(for_writes=False)
+    if missing:
+        return {"ok": False, "detail": f"missing environment variables: {', '.join(missing)}"}
+    client = servicenow.reader()
+    try:
+        await asyncio.to_thread(client.test)
+    except servicenow.ServiceNowError as error:
+        return {"ok": False, "detail": str(error)}
+    return {"ok": True, "detail": "Read credentials work.",
+            "writes_available": not servicenow.missing_env(for_writes=True)}
 
 
 # --- runs --------------------------------------------------------------------
