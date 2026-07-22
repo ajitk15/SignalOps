@@ -1278,3 +1278,76 @@ button.status-pill:hover {
   .app { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
 }
+
+/* --- agent catalogue --- */
+.agent-grid { display: grid; gap: 12px; }
+
+.agent-item {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 15px 16px;
+}
+
+.agent-top {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.agent-item h3 { margin: 0; font-size: 14px; }
+.agent-purpose { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
+
+.agent-explain {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  margin: 10px 0 0;
+  opacity: .85;
+}
+
+.agent-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.agent-meta code {
+  background: var(--panel-2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11px;
+}
+
+/* Tier is the most safety-relevant fact about an agent, so it reads loudest. */
+.tier-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.tier-read { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.tier-write_external,
+.tier-write_code {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.locked-note {
+  font-size: 11px;
+  color: var(--muted);
+  border-left: 2px solid var(--border);
+  padding-left: 9px;
+  margin-top: 12px;
+}

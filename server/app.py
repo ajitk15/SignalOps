@@ -25,11 +25,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import time  # noqa: E402
+
+from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
+from agents.catalogue import get as catalogue_get  # noqa: E402
+from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
 from auth import (SESSION_COOKIE, Principal, current_principal, issue_session,  # noqa: E402
                   provider, record_login, require_role)
-from db import audit_entries, init_db, session_scope  # noqa: E402
+from db import audit, audit_entries, init_db, session_scope  # noqa: E402
 from events import Event, bus  # noqa: E402
-from models import Role, Workspace  # noqa: E402
+from models import AgentConfig, Role, Workspace  # noqa: E402
+
+# Which tools sit at each tier — shown in the UI so the envelope is legible.
+TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
+for _tool, _tier in TOOL_TIERS.items():
+    TOOL_TIERS_BY_TIER.setdefault(_tier.value, []).append(_tool)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("signalops")
@@ -123,7 +133,6 @@ async def set_killswitch(payload: KillswitchRequest,
     Exists before the engine does on purpose: the control that halts everything
     should not be an afterthought added once there is something to halt.
     """
-    from db import audit
     with session_scope() as session:
         workspace = session.get(Workspace, principal.workspace_id)
         workspace.killswitch = payload.enabled
@@ -133,6 +142,130 @@ async def set_killswitch(payload: KillswitchRequest,
               workspace_id=workspace.id, actor_verified=principal.user.identity_verified,
               detail={"reason": payload.reason})
     return {"killswitch": payload.enabled}
+
+
+# --- agent catalogue ---------------------------------------------------------
+
+class AgentConfigRequest(BaseModel):
+    """Only the customisable fields.
+
+    There is deliberately no `tools` or `tier` here. Rejecting them would be
+    weaker than not accepting them: a field that does not exist cannot be
+    forgotten in a validator.
+    """
+    model: str | None = None
+    extra_guidance: str | None = Field(default=None, max_length=4000)
+    confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    requires_approval: bool | None = None
+    enabled: bool | None = None
+
+
+def _agent_view(spec, config, resolved) -> dict:
+    return {
+        "id": spec.id, "name": spec.name, "purpose": spec.purpose,
+        "explanation": spec.explanation, "workflow": spec.workflow,
+        "tier": spec.tier.value, "tools": list(spec.tools),
+        "output_schema": spec.output_schema,
+        "produces_confidence": spec.produces_confidence,
+        "advisory_only": spec.advisory_only,
+        "tags": list(spec.tags),
+        "default_model": spec.default_model,
+        "allowed_models": ALLOWED_MODELS,
+        # Effective values after customisation, so the UI shows what will run.
+        "model": resolved.model,
+        "confidence_threshold": resolved.confidence_threshold,
+        "requires_approval": resolved.requires_approval,
+        "enabled": resolved.enabled,
+        "extra_guidance": getattr(config, "extra_guidance", None),
+        "customised": config is not None,
+    }
+
+
+@app.get("/api/agents")
+async def list_agents(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        configs = {c.agent_id: c for c in session.query(AgentConfig)
+                   .filter(AgentConfig.workspace_id == principal.workspace_id).all()}
+        agents = []
+        for spec in CATALOGUE:
+            config = configs.get(spec.id)
+            agents.append(_agent_view(spec, config, resolve(spec, config)))
+    return {"agents": agents, "tiers": {t.value: TOOL_TIERS_BY_TIER.get(t.value, [])
+                                        for t in Tier}}
+
+
+@app.put("/api/agents/{agent_id}")
+async def update_agent(agent_id: str, payload: AgentConfigRequest,
+                       principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    spec = catalogue_get(agent_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    with session_scope() as session:
+        config = (session.query(AgentConfig)
+                  .filter(AgentConfig.workspace_id == principal.workspace_id,
+                          AgentConfig.agent_id == agent_id).one_or_none())
+        if config is None:
+            config = AgentConfig(workspace_id=principal.workspace_id, agent_id=agent_id)
+            session.add(config)
+        for attribute, value in payload.model_dump(exclude_unset=True).items():
+            setattr(config, attribute, value)
+        config.updated_at = time.time()
+        config.updated_by = principal.user.id
+        try:
+            # Resolve before committing: an invalid customisation must not be
+            # stored and then rejected later at run time.
+            resolved = resolve(spec, config)
+        except GuardrailViolation as violation:
+            session.rollback()
+            audit(session, actor=principal.user.display_name, action="agent_customise_rejected",
+                  entity_type="agent", entity_id=agent_id, workspace_id=principal.workspace_id,
+                  actor_verified=principal.user.identity_verified,
+                  detail={"reason": str(violation)})
+            session.commit()
+            raise HTTPException(status_code=422, detail=str(violation))
+        audit(session, actor=principal.user.display_name, action="agent_customised",
+              entity_type="agent", entity_id=agent_id, workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail=payload.model_dump(exclude_unset=True))
+        view = _agent_view(spec, config, resolved)
+    return view
+
+
+@app.post("/api/agents/{agent_id}/reset")
+async def reset_agent(agent_id: str,
+                      principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    if catalogue_get(agent_id) is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    with session_scope() as session:
+        deleted = (session.query(AgentConfig)
+                   .filter(AgentConfig.workspace_id == principal.workspace_id,
+                           AgentConfig.agent_id == agent_id).delete())
+        if deleted:
+            audit(session, actor=principal.user.display_name, action="agent_reset",
+                  entity_type="agent", entity_id=agent_id,
+                  workspace_id=principal.workspace_id,
+                  actor_verified=principal.user.identity_verified)
+    return {"status": "reset" if deleted else "unchanged", "id": agent_id}
+
+
+@app.get("/api/agents/{agent_id}/prompt")
+async def agent_prompt(agent_id: str,
+                       principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    """The exact prompt this agent would run with.
+
+    Shown so customisation is inspectable rather than a black box — you can see
+    where your guidance lands relative to the safety rules.
+    """
+    spec = catalogue_get(agent_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    with session_scope() as session:
+        config = (session.query(AgentConfig)
+                  .filter(AgentConfig.workspace_id == principal.workspace_id,
+                          AgentConfig.agent_id == agent_id).one_or_none())
+        resolved = resolve(spec, config)
+    return {"id": agent_id, "model": resolved.model, "tools": list(resolved.tools),
+            "tier": resolved.tier.value, "system_prompt": resolved.system_prompt}
 
 
 # --- audit -------------------------------------------------------------------
