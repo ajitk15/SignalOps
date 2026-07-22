@@ -149,13 +149,36 @@ function agentCard(agent) {
           ? `<span>gate at <code>${agent.confidence_threshold}</code></span>` : ''}
         <span>workflow <code>${esc(agent.workflow)}</code></span>
       </div>
+      ${agent.enabled ? '' : `<div class="locked-note" style="border-color:var(--warn)">
+        <strong>Disabled.</strong> ${esc(agent.disabled_effect)}</div>`}
       ${canEdit ? `<div class="row-actions" style="margin-top:12px">
-        <button class="button" onclick="openAgentDialog('${esc(agent.id)}')">Customise</button>
+        <button class="button" onclick="openAgentDialog('${esc(agent.id)}')">Edit</button>
+        <button class="button ghost" onclick="toggleAgent('${esc(agent.id)}')">
+          ${agent.enabled ? 'Disable' : 'Enable'}</button>
         <button class="button ghost" onclick="showPrompt('${esc(agent.id)}')">View prompt</button>
         ${agent.customised
           ? `<button class="button ghost" onclick="resetAgent('${esc(agent.id)}')">Reset</button>` : ''}
       </div>` : ''}
     </div>`;
+}
+
+// Quick toggle from the card. Disabling an agent the workflow depends on is
+// allowed, but never silently — you are told what stops working first.
+async function toggleAgent(id) {
+  const agent = agentCache.find(a => a.id === id);
+  const turningOff = agent.enabled;
+  if (turningOff) {
+    const warning = agent.optional
+      ? `Disable ${agent.name}?\n\n${agent.disabled_effect}`
+      : `${agent.name} is REQUIRED.\n\n${agent.disabled_effect}\n\nDisable anyway?`;
+    if (!confirm(warning)) return;
+  }
+  const response = await fetch(`/api/agents/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !agent.enabled }),
+  });
+  if (!response.ok) { toast('Could not change that agent'); return; }
+  renderAgents();
 }
 
 async function showPrompt(id) {
@@ -171,36 +194,89 @@ async function showPrompt(id) {
 function openAgentDialog(id) {
   const agent = agentCache.find(a => a.id === id);
   const body = `
-    <label>Model</label>
+    <p class="dialog-note">${esc(agent.purpose)}</p>
+
+    <div class="field-row">
+      <label class="switch">
+        <input type="checkbox" id="ag-enabled" ${agent.enabled ? 'checked' : ''} />
+        <span>Enabled</span>
+      </label>
+      <span class="field-hint">
+        ${agent.optional
+          ? 'Optional — the workflow still runs without it.'
+          : '<strong>Required</strong> — the workflow cannot run without it.'}
+      </span>
+    </div>
+    <p class="field-hint">If switched off: ${esc(agent.disabled_effect)}</p>
+
+    <label for="ag-model">Model</label>
     <select id="ag-model" class="draft-field">
       ${agent.allowed_models.map(m =>
         `<option ${m === agent.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}
     </select>
-    <label>Confidence gate ${agent.produces_confidence ? '' : '(not used by this agent)'}</label>
-    <input id="ag-threshold" class="draft-field" type="number" min="0" max="1" step="0.05"
-           value="${agent.confidence_threshold ?? ''}" ${agent.produces_confidence ? '' : 'disabled'} />
-    <label>Additional guidance</label>
-    <textarea id="ag-guidance" class="draft-editor" style="min-height:120px"
-      placeholder="Shape how this agent judges — e.g. domain conventions, what to prefer when evidence is ambiguous.">${esc(agent.extra_guidance || '')}</textarea>
-    <p class="locked-note">
-      Locked by design: tools (<code>${agent.tools.join(', ') || 'none'}</code>) and access tier
-      (<code>${esc(agent.tier)}</code>) come from code. Guidance that tries to override the
-      safety rules is rejected — otherwise customisation would be a way around them.
+    <p class="field-hint">Default is <code>${esc(agent.default_model)}</code>.</p>
+
+    ${agent.produces_confidence ? `
+      <label for="ag-threshold">Confidence gate</label>
+      <input id="ag-threshold" class="draft-field" type="number" min="0" max="1" step="0.05"
+             value="${agent.confidence_threshold ?? ''}" />
+      <p class="field-hint">Below this, the run stops and asks a human instead of proceeding.</p>
+    ` : '<p class="field-hint">This agent does not produce a confidence score.</p>'}
+
+    <div class="field-row">
+      <label class="switch">
+        <input type="checkbox" id="ag-approval" ${agent.requires_approval ? 'checked' : ''} />
+        <span>Always require human approval</span>
+      </label>
+    </div>
+    <p class="field-hint">
+      ${agent.advisory_only
+        ? 'This agent only advises, so approval is off by default.'
+        : 'This agent’s output drives an action, so approval is on by default.'}
     </p>
-    <p><button class="button" onclick="saveAgent('${esc(id)}')">Save</button></p>
+
+    <label for="ag-guidance">Additional guidance</label>
+    <textarea id="ag-guidance" class="draft-editor" style="min-height:110px"
+      placeholder="Shape how this agent judges — domain conventions, what to prefer when the evidence is ambiguous.">${esc(agent.extra_guidance || '')}</textarea>
+    <p class="field-hint">Appended below the safety rules as lower-authority text.</p>
+
+    <p class="locked-note">
+      <strong>Not editable by design:</strong> tools
+      (<code>${agent.tools.join('</code> <code>') || 'none'}</code>) and access tier
+      (<code>${esc(agent.tier)}</code>) are defined in code. Guidance that tries to override the
+      safety rules is rejected — otherwise customising an agent would be a way around them.
+    </p>
+
+    <p>
+      <button class="button" onclick="saveAgent('${esc(id)}')">Save changes</button>
+      ${agent.customised
+        ? `<button class="button ghost" onclick="closeDialog();resetAgent('${esc(id)}')">Reset to defaults</button>`
+        : ''}
+    </p>
     <p id="ag-status" class="dialog-note"></p>`;
-  showDialog(`Customise ${agent.name}`, body);
+  showDialog(`Edit ${agent.name}`, body);
 }
 
 async function saveAgent(id) {
+  const agent = agentCache.find(a => a.id === id);
   const status = el('ag-status');
+  const enabled = el('ag-enabled').checked;
+  // Same honesty as the card toggle: turning off a required agent is allowed,
+  // but you are told what it costs first.
+  if (!enabled && agent.enabled && !agent.optional
+      && !confirm(`${agent.name} is REQUIRED.\n\n${agent.disabled_effect}\n\nDisable anyway?`)) {
+    return;
+  }
   status.textContent = 'Saving…';
-  const threshold = el('ag-threshold').value;
+  const thresholdField = el('ag-threshold');
+  const threshold = thresholdField ? thresholdField.value : '';
   try {
     const response = await fetch(`/api/agents/${id}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        enabled,
         model: el('ag-model').value,
+        requires_approval: el('ag-approval').checked,
         extra_guidance: el('ag-guidance').value.trim() || null,
         confidence_threshold: threshold === '' ? null : Number(threshold),
       }),
@@ -209,6 +285,7 @@ async function saveAgent(id) {
     if (!response.ok) throw new Error(result.detail || 'save failed');
     closeDialog();
     renderAgents();
+    toast(`${agent.name} updated`);
   } catch (error) {
     status.textContent = String(error.message);
   }
@@ -218,6 +295,18 @@ async function resetAgent(id) {
   if (!confirm(`Reset ${id} to its shipped defaults?`)) return;
   await fetch(`/api/agents/${id}/reset`, { method: 'POST' });
   renderAgents();
+}
+
+// --- feedback ---------------------------------------------------------------
+
+let toastTimer;
+
+function toast(message) {
+  const node = el('toast');
+  node.textContent = message;
+  node.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove('on'), 3200);
 }
 
 // --- lightweight dialog -----------------------------------------------------

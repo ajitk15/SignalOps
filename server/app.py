@@ -168,6 +168,8 @@ def _agent_view(spec, config, resolved) -> dict:
         "output_schema": spec.output_schema,
         "produces_confidence": spec.produces_confidence,
         "advisory_only": spec.advisory_only,
+        "optional": spec.optional,
+        "disabled_effect": spec.disabled_effect,
         "tags": list(spec.tags),
         "default_model": spec.default_model,
         "allowed_models": ALLOWED_MODELS,

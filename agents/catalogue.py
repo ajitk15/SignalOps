@@ -68,6 +68,11 @@ class AgentSpec:
     produces_confidence: bool = False
     advisory_only: bool = True  # False when its output can drive an action
     default_confidence_threshold: float | None = None
+    # Can the workflow still run with this agent switched off? Advisory
+    # agents can be skipped; the ones that produce the workflow's actual
+    # output cannot, and the UI says so before you turn one off.
+    optional: bool = False
+    disabled_effect: str = ""
     system_prompt: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
 
@@ -97,6 +102,10 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "exclusion costs a human one glance, a false inclusion spends money and "
             "may act on the wrong thing."
         ),
+        optional=True,
+        disabled_effect=(
+            "Every polled ticket is treated as in scope, so the expensive agents run "
+            "on tickets they may not be able to help with."),
         tags=("classification", "cheap"),
     ),
     AgentSpec(
@@ -125,6 +134,9 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "evidence does not support a firm conclusion, lower the confidence rather "
             "than filling the gap."
         ),
+        optional=False,
+        disabled_effect=(
+            "Incident remediation cannot run: there is no diagnosis to plan from."),
         tags=("reasoning",),
     ),
     AgentSpec(
@@ -152,6 +164,10 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "smallest reversible action. If the safe answer is to escalate to a human "
             "rather than act, say that."
         ),
+        optional=False,
+        disabled_effect=(
+            "Incident remediation cannot run: the workflow would have nothing to "
+            "propose to a human."),
         tags=("planning",),
     ),
     AgentSpec(
@@ -174,6 +190,9 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "Identify the files most likely to contain the cause of the reported issue. "
             "Return paths that exist in the provided tree and nothing else."
         ),
+        optional=False,
+        disabled_effect=(
+            "Ticket to PR cannot run: nothing identifies which files to work on."),
         tags=("code", "cheap"),
     ),
     AgentSpec(
@@ -201,6 +220,10 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "else could be affected, and whether existing tests cover the area. Flag "
             "anything that suggests a human should design the fix instead."
         ),
+        optional=True,
+        disabled_effect=(
+            "Changes proceed without a complexity or risk assessment, so a human "
+            "reviews the diff with less context and no early warning."),
         tags=("code", "reasoning"),
     ),
     AgentSpec(
@@ -229,6 +252,9 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "dependency or infrastructure files unless the ticket explicitly requires it. "
             "Add or update tests when the change warrants it."
         ),
+        optional=False,
+        disabled_effect=(
+            "Ticket to PR cannot run: this is the agent that writes the change."),
         tags=("code", "mutating"),
     ),
     AgentSpec(
@@ -254,6 +280,10 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "with the surrounding code. Your verdict advises a human; it does not gate "
             "the pull request on its own."
         ),
+        optional=True,
+        disabled_effect=(
+            "The repository test suite still runs and still blocks the PR; only the "
+            "advisory diff review is skipped."),
         tags=("code", "review"),
     ),
 )

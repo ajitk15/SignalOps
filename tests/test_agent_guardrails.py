@@ -123,6 +123,40 @@ class ToolInvocationTests(unittest.TestCase):
                     self.assertIn(tool, TOOL_TIERS)
 
 
+class EnablementTests(unittest.TestCase):
+    def test_every_agent_states_what_disabling_it_costs(self):
+        """Turning an agent off is allowed, but never blind — the UI shows this
+        text before the switch is flipped."""
+        for spec in CATALOGUE:
+            with self.subTest(agent=spec.id):
+                self.assertTrue(spec.disabled_effect,
+                                f"{spec.id} has no disabled_effect")
+                self.assertGreater(len(spec.disabled_effect), 30)
+
+    def test_agents_that_produce_the_workflow_output_are_required(self):
+        # Optional means the workflow degrades; required means it cannot run.
+        required = {s.id for s in CATALOGUE if not s.optional}
+        self.assertEqual(
+            required,
+            {"diagnostician", "remediation_planner", "code_locator", "implementer"})
+
+    def test_disabling_is_a_resolvable_state_not_an_error(self):
+        config = SimpleNamespace(model=None, extra_guidance=None,
+                                 confidence_threshold=None, requires_approval=None,
+                                 enabled=False)
+        self.assertFalse(resolve(get("qa_reviewer"), config).enabled)
+
+    def test_enablement_does_not_alter_the_safety_envelope(self):
+        """A disabled agent keeps its declared tools and tier: enablement is a
+        scheduling decision, not a permission one."""
+        spec = get("implementer")
+        off = resolve(spec, SimpleNamespace(model=None, extra_guidance=None,
+                                            confidence_threshold=None,
+                                            requires_approval=None, enabled=False))
+        self.assertEqual(off.tools, spec.tools)
+        self.assertIs(off.tier, spec.tier)
+
+
 class ResolutionDefaultsTests(unittest.TestCase):
     def test_action_driving_agents_require_approval_by_default(self):
         # Advisory agents inform; these two produce something that gets acted
