@@ -78,11 +78,17 @@ class RunContext:
     specs: dict[str, AgentSpec]
     session_scope: Any
     publish: Any                       # callable(event_type, payload)
-    # External I/O. Both are constructed from the run's dry_run flag, so a node
+    # External I/O. All are constructed from the run's dry_run flag, so a node
     # cannot write live by forgetting to check a flag — in dry run the sink is
     # holding no client at all.
     sink: Any = None
     source: Any = None
+    pr_sink: Any = None
+    # The workflow's validated configuration: repository, test command, filter.
+    # Node behaviour is driven from here and never from ticket text.
+    config: dict = field(default_factory=dict)
+    workspace_factory: Any = None
+    _workspace: Any = None
     run_budget_usd: float | None = budget_module.DEFAULT_RUN_BUDGET_USD
     spent_usd: float = 0.0
     simulated: bool = field(default=False)
@@ -171,6 +177,33 @@ class RunContext:
         if result.simulated:
             self.simulated = True
         return result
+
+    # --- code workspace ------------------------------------------------------
+
+    def workspace(self, reapply: str | None = None):
+        """The repository checkout for this run, cloned on first use.
+
+        Cloned lazily and cached for the duration of one execution, not for the
+        life of the run — a run that pauses at a review gate for days comes back
+        in a different process with no temp directory, so `reapply` re-applies
+        the checkpointed patch to a fresh clone. The patch is the durable
+        artifact; the checkout never is.
+        """
+        if self._workspace is None:
+            if self.workspace_factory is None:
+                raise RuntimeError("this workflow has no repository configured")
+            self._workspace = self.workspace_factory()
+            self._workspace.clone()
+            if reapply:
+                self._workspace.apply_patch(reapply)
+        elif reapply and not self._workspace.changed_files():
+            self._workspace.apply_patch(reapply)
+        return self._workspace
+
+    def release_workspace(self) -> None:
+        if self._workspace is not None:
+            self._workspace.cleanup()
+            self._workspace = None
 
     def enabled(self, agent_id: str) -> bool:
         agent = self.agents.get(agent_id)

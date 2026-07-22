@@ -17,4 +17,21 @@ sqlalchemy>=2.0
 itsdangerous>=2.0
 langgraph>=1.0,<2.0
 langgraph-checkpoint-sqlite>=3.0,<4.0
+
+# Two Claude surfaces, on purpose. `anthropic` (the Client SDK) answers the
+# reasoning nodes: one structured JSON reply each, schema enforced by the API.
+# `claude-agent-sdk` runs the implementer, which needs an agent loop over file
+# tools — the alternative is reimplementing Read, Edit, Glob and Grep and the
+# loop around them. Its built-in Bash tool is disallowed; the repository's test
+# suite is run by a deterministic node from validated configuration.
 anthropic>=0.118,<1.0
+claude-agent-sdk>=0.2,<1.0
+
+# git is invoked as a subprocess rather than through a library: the operations
+# needed here are half a dozen porcelain commands, and a subprocess boundary is
+# easier to time out and to keep credentials out of.
+
+# Tests only. The code workflow's fixtures build throwaway repositories with a
+# real suite, because "a failing suite blocks the pull request" is not a claim
+# worth testing against a fake.
+pytest>=8.0

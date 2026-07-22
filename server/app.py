@@ -463,6 +463,14 @@ class WorkflowConfigRequest(BaseModel):
     poll_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
     dry_run: bool | None = None
     run_budget_usd: float | None = Field(default=None, gt=0, le=100)
+    # Code workflows. The repository is configuration and never comes from a
+    # ticket — a ticket that could name its target could choose what the bot
+    # writes to.
+    repo_url: str | None = Field(default=None, max_length=500)
+    repo_full_name: str | None = Field(default=None, max_length=200)
+    base_branch: str | None = Field(default=None, max_length=100)
+    test_command: str | None = Field(default=None, max_length=500)
+    allow_dependency_changes: bool | None = None
 
 
 @app.put("/api/workflows/{workflow_id}/config")

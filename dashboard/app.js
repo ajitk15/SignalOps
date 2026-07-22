@@ -142,7 +142,8 @@ const WIZARD_STEPS = [
   { id: 'enable', label: 'Enable' },
 ];
 
-const wizard = { step: 0, workflowId: null, dismissed: false, active: false, runId: null };
+const wizard = { step: 0, workflowId: null, dismissed: false, active: false,
+                 runId: null, template: 'incident_remediation' };
 
 function startWizard() {
   Object.assign(wizard, { step: 0, workflowId: null, dismissed: false, active: true, runId: null });
@@ -193,27 +194,60 @@ function wizardNav(backLabel, nextLabel, nextAction, { nextDisabled = false, not
 function wizardBack() { wizard.step = Math.max(0, wizard.step - 1); renderWorkflows(); }
 function wizardNext() { wizard.step = Math.min(WIZARD_STEPS.length - 1, wizard.step + 1); renderWorkflows(); }
 
+const TEMPLATE_CARDS = [
+  {
+    id: 'incident_remediation',
+    name: 'Incident remediation',
+    what: 'Takes an incident from ServiceNow, gathers the recent changes and past incidents '
+      + 'around it, forms a root-cause hypothesis, writes a proposed remediation plan back '
+      + 'to the ticket, and asks a human before anything else.',
+    touches: 'ServiceNow — reads incidents, changes and knowledge articles; appends a work '
+      + 'note; can resolve a ticket.',
+    unattended: 'Read, diagnose, and write a work note describing what it proposes.',
+    never: 'Execute a remediation. It proposes; a person runs the steps and reports back.',
+  },
+  {
+    id: 'ticket_to_pr',
+    name: 'Ticket to pull request',
+    what: 'Takes a bug, finds the relevant files, assesses how large and risky the change '
+      + 'would be, writes it on a branch in a throwaway clone, runs your test suite, and '
+      + 'asks a human to read the diff.',
+    touches: 'Your repository — clones it, commits to a per-run branch, opens a draft pull '
+      + 'request. Writes a note back to the ticket.',
+    unattended: 'Read code, assess impact, write a change on a branch, and run your tests.',
+    never: 'Merge anything, touch the default branch, or edit CI, infrastructure or secrets. '
+      + 'A failing test suite blocks the pull request no matter what the reviewer agent says.',
+  },
+];
+
 function wizardTemplate(workflow) {
+  const chosen = (workflow && workflow.template) || wizard.template || 'incident_remediation';
+  wizard.template = chosen;
   el('wizard-body').innerHTML = `
     <h3>What should this workflow do?</h3>
-    <div class="template-card">
-      <strong>Incident remediation</strong>
-      <p class="agent-purpose">Takes an incident from ServiceNow, gathers the recent changes
-        and past incidents around it, forms a root-cause hypothesis, writes a proposed
-        remediation plan back to the ticket, and asks a human before anything else.</p>
-      <ul class="template-facts">
-        <li><strong>Touches:</strong> ServiceNow — reads incidents, changes and knowledge
-          articles; appends a work note; can resolve a ticket.</li>
-        <li><strong>Will do unattended:</strong> read, diagnose, and write a work note
-          describing what it proposes.</li>
-        <li><strong>Will never do unattended:</strong> execute a remediation. It proposes;
-          a person runs the steps and reports back.</li>
-      </ul>
-    </div>
+    ${TEMPLATE_CARDS.map(t => `
+      <label class="template-card ${t.id === chosen ? 'chosen' : ''}">
+        <input type="radio" name="wz-template" value="${t.id}" ${t.id === chosen ? 'checked' : ''}
+          ${workflow ? 'disabled' : ''} onchange="pickTemplate('${t.id}')" />
+        <strong>${esc(t.name)}</strong>
+        <p class="agent-purpose">${esc(t.what)}</p>
+        <ul class="template-facts">
+          <li><strong>Touches:</strong> ${esc(t.touches)}</li>
+          <li><strong>Will do unattended:</strong> ${esc(t.unattended)}</li>
+          <li><strong>Will never do unattended:</strong> ${esc(t.never)}</li>
+        </ul>
+      </label>`).join('')}
+    ${workflow ? '<p class="field-hint">The template is fixed once a workflow exists. '
+      + 'Create another workflow to use the other one.</p>' : ''}
     <label for="wz-name">Name</label>
     <input id="wz-name" class="draft-field" value="${esc(workflow ? workflow.name
-      : 'Incident remediation')}" />
+      : TEMPLATE_CARDS.find(t => t.id === chosen).name)}" />
     ${wizardNav('Back', workflow ? 'Next' : 'Create and continue', 'wizardCreate()')}`;
+}
+
+function pickTemplate(id) {
+  wizard.template = id;
+  renderWorkflows();
 }
 
 async function wizardCreate() {
@@ -221,7 +255,8 @@ async function wizardCreate() {
   if (!wizard.workflowId) {
     const response = await fetch('/api/workflows', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template: 'incident_remediation', name, dry_run: true }),
+      body: JSON.stringify({ template: wizard.template || 'incident_remediation',
+                             name, dry_run: true }),
     });
     if (!response.ok) return toast((await response.json()).detail || 'could not create', false);
     wizard.workflowId = (await response.json()).id;
@@ -267,16 +302,49 @@ async function testConnection() {
 
 function wizardConfigure(workflow) {
   const config = (workflow && workflow.config) || {};
+  const isCode = (workflow && workflow.template) === 'ticket_to_pr';
   el('wizard-body').innerHTML = `
     <h3>How should it run?</h3>
-    <label for="wz-filter">Which incidents (ServiceNow encoded query)</label>
-    <input id="wz-filter" class="draft-field" placeholder="active=true^priority<=2^assignment_group=InfraSupport"
-      value="${esc(config.filter_query || '')}" />
-    <p class="field-hint">Leave empty to start runs by hand instead of polling.</p>
+    ${isCode ? `
+      <label for="wz-repo">Repository (clone URL)</label>
+      <input id="wz-repo" class="draft-field" placeholder="https://github.com/acme/widget.git"
+        value="${esc(config.repo_url || '')}" />
+      <p class="field-hint">Configuration, never the ticket. A ticket that could name its own
+        repository could choose what the bot writes to.</p>
 
-    <label for="wz-interval">Poll every (seconds)</label>
-    <input id="wz-interval" class="draft-field" type="number" min="30" max="3600" step="30"
-      value="${config.poll_interval_seconds || 120}" />
+      <label for="wz-fullname">Repository (owner/name, for the pull request)</label>
+      <input id="wz-fullname" class="draft-field" placeholder="acme/widget"
+        value="${esc(config.repo_full_name || '')}" />
+
+      <label for="wz-base">Base branch</label>
+      <input id="wz-base" class="draft-field" value="${esc(config.base_branch || 'main')}" />
+      <p class="field-hint">The workflow commits to a per-run branch and opens a draft pull
+        request. It cannot push to this branch and has no way to merge.</p>
+
+      <label for="wz-tests">Test command</label>
+      <input id="wz-tests" class="draft-field" placeholder="pytest -q"
+        value="${esc(config.test_command || '')}" />
+      <p class="field-hint">Run in the checkout after the change. <strong>A failing suite
+        blocks the pull request</strong> regardless of what the reviewer agent thinks. Leave
+        this empty and a run reports "not verified" rather than "passed".</p>
+
+      <div class="field-row">
+        <label class="switch"><input type="checkbox" id="wz-deps"
+          ${config.allow_dependency_changes ? 'checked' : ''} /><span>Allow dependency
+          changes</span></label>
+        <span class="field-hint">Off by default. CI, infrastructure and secrets stay refused
+          either way — there is no setting for those.</span>
+      </div>
+    ` : `
+      <label for="wz-filter">Which incidents (ServiceNow encoded query)</label>
+      <input id="wz-filter" class="draft-field" placeholder="active=true^priority<=2"
+        value="${esc(config.filter_query || '')}" />
+      <p class="field-hint">Leave empty to start runs by hand instead of polling.</p>
+
+      <label for="wz-interval">Poll every (seconds)</label>
+      <input id="wz-interval" class="draft-field" type="number" min="30" max="3600" step="30"
+        value="${config.poll_interval_seconds || 120}" />
+    `}
 
     <label for="wz-budget">Budget per run (USD)</label>
     <input id="wz-budget" class="draft-field" type="number" min="0.25" max="100" step="0.25"
@@ -294,7 +362,14 @@ function wizardConfigure(workflow) {
 async function wizardSaveConfig() {
   const response = await fetch(`/api/workflows/${wizard.workflowId}/config`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    body: JSON.stringify(el('wz-repo') ? {
+      repo_url: el('wz-repo').value.trim(),
+      repo_full_name: el('wz-fullname').value.trim(),
+      base_branch: el('wz-base').value.trim() || 'main',
+      test_command: el('wz-tests').value.trim(),
+      allow_dependency_changes: el('wz-deps').checked,
+      run_budget_usd: Number(el('wz-budget').value) || 1,
+    } : {
       filter_query: el('wz-filter').value.trim(),
       poll_interval_seconds: Number(el('wz-interval').value) || 120,
       run_budget_usd: Number(el('wz-budget').value) || 1,
@@ -304,9 +379,11 @@ async function wizardSaveConfig() {
   wizardNext();
 }
 
-async function wizardAgents() {
+async function wizardAgents(workflow) {
+  if (workflow) wizard.template = workflow.template;
   const data = await (await fetch('/api/agents')).json();
-  const mine = data.agents.filter(a => ['incident_remediation', 'both'].includes(a.workflow));
+  const template = wizard.template || 'incident_remediation';
+  const mine = data.agents.filter(a => [template, 'both'].includes(a.workflow));
   el('wizard-body').innerHTML = `
     <h3>These agents will run</h3>
     <p class="agent-purpose">Every agent that can act on your tickets, with the model it uses

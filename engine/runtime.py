@@ -34,11 +34,12 @@ from agents.catalogue import for_workflow
 from agents.catalogue import get as catalogue_get
 from agents.guard import GuardrailViolation, resolve
 from db import audit, session_scope
-from engine import incident
+from engine import incident, ticket_to_pr
 from engine.approvals import StaleApproval, canonical_hash
 from engine.budget import DEFAULT_RUN_BUDGET_USD, BudgetExceeded
 from engine.llm import ModelCallFailed, build_client
 from engine.state import Halted, RunContext
+from integrations.repo import PullRequestSink, RepoWorkspace, bot_token
 from integrations.servicenow import ContextSource, TicketSink
 from events import Event, bus
 from models import AgentConfig, Approval, ApprovalStatus, Run, RunStatus, Workflow, Workspace
@@ -47,9 +48,9 @@ logger = logging.getLogger("engine.runtime")
 
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints.db"
 
-# One template so far. Phase 4 registers ticket_to_pr alongside it; the registry
-# exists now so adding it is a line here rather than a change to the engine.
-TEMPLATES = {incident.TEMPLATE: incident}
+# The registry is the whole extension point: a new workflow is a module with a
+# build() and a REQUIRED_AGENTS, and a line here.
+TEMPLATES = {incident.TEMPLATE: incident, ticket_to_pr.TEMPLATE: ticket_to_pr}
 
 MAX_CONCURRENT_RUNS = int(os.getenv("SIGNALOPS_MAX_CONCURRENT_RUNS", "4"))
 
@@ -74,7 +75,8 @@ class DuplicateRun(EngineError):
 
 class Engine:
     def __init__(self, *, client=None, checkpoint_path: Path | None = None,
-                 sink_factory=None, source_factory=None) -> None:
+                 sink_factory=None, source_factory=None, pr_sink_factory=None,
+                 repo_factory=None) -> None:
         path = Path(checkpoint_path or CHECKPOINT_PATH)
         path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False because runs execute on the pool; SqliteSaver
@@ -87,6 +89,9 @@ class Engine:
         # instance, and so phase 4 can register a different sink.
         self._sink_factory = sink_factory or (lambda *, dry_run: TicketSink(dry_run=dry_run))
         self._source_factory = source_factory or ContextSource
+        self._pr_sink_factory = pr_sink_factory or (
+            lambda *, dry_run: PullRequestSink(dry_run=dry_run))
+        self._repo_factory = repo_factory
         self._pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS,
                                         thread_name_prefix="signalops-run")
         self._lock = threading.Lock()
@@ -177,9 +182,12 @@ class Engine:
                     f"without it: {spec.disabled_effect}")
 
     def _context(self, *, run_id, workspace_id, workflow_id, dry_run, actor,
-                 actor_verified, template, budget) -> RunContext:
+                 actor_verified, template, budget, config=None) -> RunContext:
         with session_scope() as session:
             configs = _configs(session, workspace_id)
+            if config is None:
+                workflow = session.get(Workflow, workflow_id)
+                config = dict(workflow.config) if workflow else {}
         agents, specs = {}, {}
         for spec in for_workflow(template):
             try:
@@ -195,9 +203,31 @@ class Engine:
                           dry_run=dry_run, actor=actor, actor_verified=actor_verified,
                           client=self.client, agents=agents, specs=specs,
                           session_scope=session_scope, publish=self._publish,
-                          run_budget_usd=budget,
+                          run_budget_usd=budget, config=config,
                           sink=self._sink_factory(dry_run=dry_run),
-                          source=self._source_factory())
+                          source=self._source_factory(),
+                          pr_sink=self._pr_sink_factory(dry_run=dry_run),
+                          workspace_factory=self._workspace_factory(run_id, config))
+
+    def _workspace_factory(self, run_id: str, config: dict):
+        """How this run gets its checkout, or None for workflows without a repo.
+
+        The repository and base branch come from workflow configuration only.
+        A ticket that could name its own target repository would be a ticket
+        that could choose what the bot writes to.
+        """
+        if self._repo_factory is not None:
+            return lambda: self._repo_factory(run_id=run_id, config=config)
+        url = config.get("repo_url")
+        if not url:
+            return None
+        return lambda: RepoWorkspace(
+            url=url,
+            base_branch=config.get("base_branch", "main"),
+            branch=f"signalops/{run_id[:8]}",
+            token=bot_token(),
+            allow_dependencies=bool(config.get("allow_dependency_changes")))
+
 
     # --- driving -------------------------------------------------------------
 
@@ -209,9 +239,11 @@ class Engine:
         try:
             state = graph.invoke(payload, config)
         except Halted as halt:
+            context.release_workspace()
             self._stop(context, RunStatus.cancelled, str(halt), kind=halt.kind)
             return
         except (BudgetExceeded,) as over:
+            context.release_workspace()
             self._stop(context, RunStatus.cancelled, str(over), kind="budget")
             return
         except (ModelCallFailed, Exception) as error:      # noqa: BLE001 — see below
@@ -219,9 +251,11 @@ class Engine:
             # recorded as failed rather than leaving a "running" row behind and a
             # traceback in a log nobody reads.
             logger.exception("run %s failed", context.run_id)
+            context.release_workspace()
             self._stop(context, RunStatus.failed, f"{type(error).__name__}: {error}")
             return
 
+        context.release_workspace()
         pending = state.get("__interrupt__")
         if pending:
             self._pause(context, pending)

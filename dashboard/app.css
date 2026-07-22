@@ -1552,3 +1552,12 @@ button.status-pill:hover {
   color: var(--muted);
   line-height: 1.5;
 }
+
+/* A template card is a choice, so it reads as one. */
+.template-card { display: block; cursor: pointer; }
+.template-card input[type="radio"] { margin-right: 8px; }
+.template-card.chosen {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.template-card + .template-card { margin-top: 10px; }
