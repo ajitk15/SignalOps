@@ -1085,11 +1085,15 @@ async function renderConnections() {
         account needs only enough permission to append a work note and set a state, so what
         the workflow can do is bounded by the credential and not only by the prompt.</p>
       ${data.auth_method === 'basic' ? `<p class="field-hint">Using <strong>HTTP Basic</strong>.
-        Many instances refuse basic authentication for the REST API while still accepting the
-        same credential at the login page — which returns a 401 identical to a wrong password.
-        Set <code>SN_CLIENT_ID</code> and <code>SN_CLIENT_SECRET</code> to switch to OAuth.</p>`
+        If a test fails with 401 while the same account signs in fine at the instance login
+        page, check the user's <strong>identity type</strong> — ServiceNow refuses basic
+        authentication for the REST API from accounts typed as Human, and an integration
+        account must be set to <strong>Machine</strong>. Alternatively set
+        <code>SN_CLIENT_ID</code> and <code>SN_CLIENT_SECRET</code> to use OAuth instead;
+        both schemes are supported.</p>`
         : '<p class="field-hint">Using <strong>OAuth</strong>. Tokens are held in memory only, '
-          + 'never stored and never returned by any endpoint.</p>'}
+          + 'never stored and never returned by any endpoint. Basic authentication remains '
+          + 'available — unset the client variables to fall back to it.</p>'}
       ${data.missing_for_writes.length && !data.missing_for_reads.length ? `
         <p class="field-hint">Without write credentials the workflow still runs end to end and
         records the work note it would have posted.</p>` : ''}

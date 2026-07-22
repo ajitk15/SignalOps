@@ -13,6 +13,15 @@ write account needs the minimum to append a work note and set a state. An
 agent-driven system that can only append notes with the credentials it has is
 bounded by the credentials, not only by the prompt.
 
+**Two authentication schemes, both supported.** Basic auth is the default and
+needs no setup beyond a username and password. OAuth engages the moment
+`SN_CLIENT_ID` and `SN_CLIENT_SECRET` are present. Both are kept rather than
+picking a winner: basic auth is far simpler for a dev instance, and OAuth is
+what some instances require. Note that ServiceNow refuses basic auth for REST
+from accounts whose identity type is Human — an integration account must be set
+to Machine on the user record, and the 401 it returns until then is identical
+to the one a wrong password produces.
+
 **Dry run is the default and it is real.** In dry run nothing leaves the
 process; the exact payload that would have been sent is returned and recorded,
 so a run is reviewable before the connection is allowed to write.
@@ -47,11 +56,12 @@ ENV_VARS = {
 
 # OAuth, optional. Present means OAuth is used; absent means basic auth.
 #
-# Not an alternative for its own sake: ServiceNow instances increasingly refuse
-# HTTP Basic for the REST API while still accepting the same credential at the
-# UI login form, which produces a 401 that looks exactly like a wrong password.
-# Create these under System OAuth → Application Registry → "Create an OAuth API
-# endpoint for external clients".
+# Kept alongside basic auth rather than replacing it. Some instances refuse
+# HTTP Basic for the REST API outright, and the 401 they return is identical to
+# the one a wrong password produces — having the alternative already wired is
+# what makes that diagnosable instead of a dead end. Create these under
+# System OAuth → Application Registry → "Create an OAuth API endpoint for
+# external clients".
 OAUTH_ENV_VARS = {
     "client_id": "SN_CLIENT_ID",
     "client_secret": "SN_CLIENT_SECRET",
@@ -326,13 +336,21 @@ def _explain_rejection(response, auth_method: str) -> str:
         return ("ServiceNow rejected the OAuth token (401). The token was refreshed and "
                 "retried once. Check that the OAuth application is active and that the "
                 "account is not locked.")
-    return ("ServiceNow rejected the credential (401). Note that this is the same "
-            "response the instance gives for a user that does not exist, so it does not "
-            "by itself mean the password is wrong. If the same account can sign in at "
-            "/login.do, the instance is refusing HTTP Basic for the REST API — set "
-            f"{OAUTH_ENV_VARS['client_id']} and {OAUTH_ENV_VARS['client_secret']} to use "
-            "OAuth instead, or check whether the account has multi-factor authentication "
-            "enabled, which basic auth cannot satisfy.")
+    return (
+        "ServiceNow rejected the credential (401). This is the same response the instance "
+        "gives for a user that does not exist, so it does not by itself mean the password "
+        "is wrong.\n"
+        "If the same account can sign in at /login.do, the password is fine and something "
+        "is refusing it for REST specifically. In order of likelihood:\n"
+        "  1. The user's identity type is Human. Recent ServiceNow releases refuse HTTP "
+        "Basic for the REST API from human accounts; an integration account has to be set "
+        "to Machine on the user record. This is the usual cause and it is easy to miss, "
+        "because nothing about the error mentions it.\n"
+        "  2. The account has multi-factor authentication enabled, which basic auth "
+        "cannot satisfy.\n"
+        "  3. The instance refuses basic auth for REST entirely — set "
+        f"{OAUTH_ENV_VARS['client_id']} and {OAUTH_ENV_VARS['client_secret']} to use "
+        "OAuth instead.")
 
 
 def _oauth_credentials() -> tuple[str | None, str | None]:
