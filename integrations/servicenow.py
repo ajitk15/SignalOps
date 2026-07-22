@@ -149,6 +149,39 @@ def _save_kb_refs(refs: dict) -> None:
     KB_REFS_PATH.write_text(json.dumps(refs, indent=1), encoding="utf-8")
 
 
+def push_incident_state(incident: dict, status: str) -> str | None:
+    """Mirror a SignalOps status change onto the linked ServiceNow ticket.
+
+    Best-effort by design: a delivery failure must never block the local status
+    change, so this reports rather than raises. Returns a short outcome string.
+    """
+    ref = (incident.get("external_refs") or {}).get("servicenow") or {}
+    sys_id = ref.get("sys_id")
+    if not sys_id:
+        return None
+    state_map = delivery_config().get("state_map", {})
+    if status not in state_map:
+        return None
+    fields = {"state": state_map[status]}
+    if incident.get("resolution_note"):
+        fields["close_notes"] = incident["resolution_note"]
+    current_mode = mode()
+    if current_mode != "live":
+        logger.info("DRY RUN would set ServiceNow %s state for incident #%s: %s",
+                    ref.get("number"), incident.get("id"), json.dumps(fields))
+        return "dry_run"
+    try:
+        writer = writer_from_env()
+        if writer is None:
+            return "not configured"
+        writer._patch("incident", sys_id, fields)
+        logger.info("ServiceNow %s state updated for incident #%s", ref.get("number"), incident.get("id"))
+        return "updated"
+    except Exception as exc:
+        logger.exception("ServiceNow state push failed for incident #%s", incident.get("id"))
+        return f"failed: {exc}"
+
+
 def kb_payload(slug: str, content: str) -> dict:
     title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
     fields = {"short_description": title_match.group(1).strip() if title_match else slug,

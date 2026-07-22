@@ -184,6 +184,7 @@ async def api_create_rule(payload: RuleRequest) -> dict:
         raise HTTPException(status_code=409, detail="a rule with this id already exists")
     rule = _rule_from(payload)
     _apply_custom(custom + [rule], custom)
+    store.audit(actor="dashboard", action="rule_created", entity_type="rule", entity_id=payload.id, detail=rule)
     return {"status": "created", "rule": rule}
 
 
@@ -205,6 +206,8 @@ async def api_update_rule(rule_id: str, payload: RuleRequest) -> dict:
     rule = _rule_from(payload)
     updated = [r for r in custom if r["id"] != rule_id] + [rule]
     _apply_custom(updated, custom)
+    store.audit(actor="dashboard", action="rule_updated", entity_type="rule", entity_id=rule_id,
+                detail={"rule": rule, "overrides_builtin": is_builtin})
     return {"status": "updated", "rule": rule, "overrides_builtin": is_builtin}
 
 
@@ -215,11 +218,13 @@ async def api_delete_rule(rule_id: str) -> dict:
     if rule_id in {r["id"] for r in _builtin_rules()}:
         updated = [r for r in custom if r["id"] != rule_id] + [{"id": rule_id, "disabled": True}]
         _apply_custom(updated, custom)
+        store.audit(actor="dashboard", action="rule_disabled", entity_type="rule", entity_id=rule_id)
         return {"status": "disabled", "id": rule_id}
     remaining = [r for r in custom if r["id"] != rule_id]
     if len(remaining) == len(custom):
         raise HTTPException(status_code=404, detail="rule not found")
     _apply_custom(remaining, custom)
+    store.audit(actor="dashboard", action="rule_deleted", entity_type="rule", entity_id=rule_id)
     return {"status": "deleted", "id": rule_id}
 
 
@@ -233,7 +238,50 @@ async def api_reset_rule(rule_id: str) -> dict:
     if len(remaining) == len(custom):
         return {"status": "unchanged", "id": rule_id}
     _apply_custom(remaining, custom)
+    store.audit(actor="dashboard", action="rule_reset", entity_type="rule", entity_id=rule_id)
     return {"status": "reset", "id": rule_id}
+
+
+class IncidentPatch(BaseModel):
+    status: str = Field(pattern=r"^(open|acknowledged|resolved|closed|false_positive)$")
+    # Self-asserted: with no authentication in front of this API, the audit log
+    # records a claimed actor, not a verified identity.
+    actor: str = Field(default="dashboard", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=2000)
+    assignee: str | None = Field(default=None, max_length=80)
+
+
+@app.patch("/api/incidents/{incident_id}")
+async def api_update_incident(incident_id: int, payload: IncidentPatch) -> dict:
+    incident = store.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="incident not found")
+    updated = store.set_incident_status(incident_id, payload.status, actor=payload.actor,
+                                        note=payload.note, assignee=payload.assignee)
+    # Terminal means a human is finished: drop the dedup memory so the same
+    # condition recurring is never silently swallowed as a duplicate.
+    if payload.status in store.TERMINAL_STATUSES and updated.get("fingerprint"):
+        enterprise_pipeline.correlator.forget(updated["fingerprint"])
+    snow_result = await asyncio.to_thread(snow.push_incident_state, updated, payload.status) \
+        if payload.status in store.TERMINAL_STATUSES else None
+    bus.publish(Event("incident_updated", {"incident_id": incident_id, "status": payload.status,
+                                           "severity": updated.get("severity"),
+                                           "title": updated.get("title"),
+                                           "assignee": updated.get("assignee")}))
+    return {"status": "updated", "incident": updated, "servicenow": snow_result}
+
+
+@app.get("/api/audit")
+async def api_audit(limit: int = 100, entity_type: str | None = None,
+                    entity_id: str | None = None) -> dict:
+    return {"entries": store.audit_entries(entity_type, entity_id, limit=min(limit, 500)),
+            # Surfaced in the UI: an audit trail without authn records claims.
+            "actor_verified": False}
+
+
+@app.get("/api/metrics")
+async def api_metrics() -> dict:
+    return store.incident_metrics()
 
 
 @app.get("/api/incidents/{incident_id}")
@@ -241,7 +289,7 @@ async def api_get_incident(incident_id: int) -> dict:
     incident = store.get_incident(incident_id)
     if incident is None:
         return {"error": "not found"}
-    return incident
+    return incident | {"audit": store.audit_entries("incident", str(incident_id), limit=50)}
 
 
 class ObservationRequest(BaseModel):
@@ -308,6 +356,8 @@ async def api_approve_kb_article(incident_id: int, payload: KbApprovalRequest) -
         raise HTTPException(status_code=409, detail="an approved article with this title already exists")
     reviewed = f"<!-- Approved by: {payload.approved_by.strip()} · Incident: #{incident_id} -->\n\n{payload.markdown.strip()}\n"
     path.write_text(reviewed, encoding="utf-8")
+    store.audit(actor=payload.approved_by, action="kb_approved", entity_type="kb_article",
+                entity_id=path.stem, detail={"title": title, "incident_id": incident_id})
     return {"status": "approved", "title": title, "filename": path.name}
 
 
@@ -340,6 +390,7 @@ async def api_update_kb_article(slug: str, payload: KbArticleUpdateRequest) -> d
         raise HTTPException(status_code=404, detail="article not found")
     reviewed = f"<!-- Last edited by: {payload.edited_by.strip()} -->\n\n{payload.markdown.strip()}\n"
     path.write_text(reviewed, encoding="utf-8")
+    store.audit(actor=payload.edited_by, action="kb_edited", entity_type="kb_article", entity_id=slug)
     return {"status": "updated", "filename": path.name}
 
 
@@ -349,6 +400,7 @@ async def api_delete_kb_article(slug: str) -> dict:
     if not path.exists():
         raise HTTPException(status_code=404, detail="article not found")
     path.unlink()
+    store.audit(actor="dashboard", action="kb_deleted", entity_type="kb_article", entity_id=slug)
     return {"status": "deleted", "filename": path.name}
 
 

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -258,6 +259,107 @@ class ServiceNowOutboxTests(unittest.TestCase):
         from integrations import servicenow
         with patch.dict("os.environ", {"SERVICENOW_MODE": "off"}):
             asyncio.run(servicenow.deliver_forever())  # returns immediately
+
+
+class RecurrenceTests(unittest.TestCase):
+    """The decided answer to: an incident is closed and the alert fires again."""
+
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.addCleanup(logging.disable, logging.NOTSET)
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        patcher = patch("store.DB_PATH", Path(self._temp.name) / "incidents.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.pipeline = EnterprisePipeline(use_ai=False)
+
+    def _breach(self):
+        return asyncio.run(self.pipeline.ingest(
+            Observation("mq_mcp", "queue", "QM1/Q", "queue_depth", 99,
+                        labels={"service": "orders", "environment": "prod"}, threshold=10)))
+
+    def test_active_incident_suppresses_indefinitely(self):
+        """One standing condition is one incident — not one per dedup window."""
+        first = self._breach()
+        self.assertEqual(first["outcome"], "incident_created")
+        # Far beyond the 900s dedup window: an OPEN incident still suppresses.
+        with patch("time.time", return_value=time.time() + 10_000):
+            again = self._breach()
+        self.assertEqual(again["outcome"], "deduplicated")
+        self.assertEqual(again["incident_id"], first["incident_id"])
+        self.assertEqual(len(store.list_incidents()), 1)
+
+    def test_recurrence_soon_after_close_reopens_the_same_incident(self):
+        first = self._breach()
+        store.set_incident_status(first["incident_id"], "closed", actor="ops")
+        self.pipeline.correlator.forget("prod:orders:queue_depth")
+        again = self._breach()
+        self.assertEqual(again["outcome"], "incident_reopened")
+        self.assertEqual(again["incident_id"], first["incident_id"])
+        row = store.get_incident(first["incident_id"])
+        self.assertEqual(row["status"], "open")
+        self.assertEqual(row["reopen_count"], 1)
+        self.assertIsNone(row["closed_at"])  # reopen clears the closure stamp
+        self.assertEqual(len(store.list_incidents()), 1)
+
+    def test_recurrence_after_the_window_opens_a_linked_new_incident(self):
+        first = self._breach()
+        store.set_incident_status(first["incident_id"], "closed", actor="ops")
+        self.pipeline.correlator.forget("prod:orders:queue_depth")
+        beyond = time.time() + self.pipeline.reopen_window_seconds + 60
+        with patch("time.time", return_value=beyond):
+            again = self._breach()
+        self.assertEqual(again["outcome"], "incident_created")
+        self.assertNotEqual(again["incident_id"], first["incident_id"])
+        self.assertEqual(store.get_incident(again["incident_id"])["previous_incident_id"],
+                         first["incident_id"])
+
+    def test_closing_clears_dedup_so_a_recurrence_is_never_swallowed(self):
+        """The bug this feature exists to fix: without forget(), a recurrence
+        inside the dedup window after a close vanished silently."""
+        finding = self.pipeline.rules.evaluate(
+            Observation("mq_mcp", "queue", "QM1/Q", "queue_depth", 99,
+                        labels={"service": "orders", "environment": "prod"}, threshold=10))
+        self.pipeline.correlator.is_new(finding)          # stamps _last_seen
+        self.assertFalse(self.pipeline.correlator.is_new(finding))
+        self.pipeline.correlator.forget(finding.fingerprint)
+        self.assertTrue(self.pipeline.correlator.is_new(finding))
+
+    def test_status_transitions_are_audited(self):
+        first = self._breach()
+        incident_id = first["incident_id"]
+        store.set_incident_status(incident_id, "acknowledged", actor="alice")
+        store.set_incident_status(incident_id, "resolved", actor="bob", note="restarted consumer")
+        store.set_incident_status(incident_id, "closed", actor="bob")
+        actions = [e["action"] for e in store.audit_entries("incident", str(incident_id))]
+        self.assertEqual(actions, ["incident_closed", "incident_resolved", "incident_acknowledged"])
+        resolved = [e for e in store.audit_entries("incident", str(incident_id))
+                    if e["action"] == "incident_resolved"][0]
+        self.assertEqual(resolved["actor"], "bob")
+        self.assertEqual(resolved["detail"]["note"], "restarted consumer")
+
+    def test_mttr_is_measured_over_resolved_incidents(self):
+        first = self._breach()
+        store.set_incident_status(first["incident_id"], "resolved", actor="ops")
+        metrics = store.incident_metrics()
+        self.assertEqual(metrics["counts"]["resolved"], 1)
+        self.assertIsNotNone(metrics["mttr_seconds"])
+
+    def test_closing_without_an_explicit_resolve_still_counts_toward_mttr(self):
+        """Closing straight from open is the common path; MTTR must not
+        silently ignore it."""
+        first = self._breach()
+        store.set_incident_status(first["incident_id"], "closed", actor="ops")
+        row = store.get_incident(first["incident_id"])
+        self.assertIsNotNone(row["resolved_at"])
+        self.assertIsNotNone(store.incident_metrics()["mttr_seconds"])
+
+    def test_false_positive_is_excluded_from_mttr(self):
+        first = self._breach()
+        store.set_incident_status(first["incident_id"], "false_positive", actor="ops")
+        self.assertIsNone(store.get_incident(first["incident_id"])["resolved_at"])
+        self.assertIsNone(store.incident_metrics()["mttr_seconds"])
 
 
 class SeverityModeTests(unittest.TestCase):

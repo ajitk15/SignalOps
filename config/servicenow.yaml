@@ -9,6 +9,13 @@ category: Middleware
 # sys_id or exact name; empty uses the instance default.
 kb_knowledge_base: ""
 
+# SignalOps status -> ServiceNow incident state value, pushed when an incident
+# reaches a terminal state here. Defaults match the stock ServiceNow states.
+state_map:
+  resolved: 6      # Resolved
+  closed: 7        # Closed
+  false_positive: 8  # Canceled
+
 severity_map:
   P1: {urgency: 1, impact: 1}
   P2: {urgency: 2, impact: 2}

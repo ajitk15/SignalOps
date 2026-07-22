@@ -332,6 +332,96 @@
     }
 
     .sev-P3,
+    /* --- lifecycle ------------------------------------------------------ */
+    .status-badge {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      text-transform: capitalize;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      white-space: nowrap;
+      margin-right: 6px;
+    }
+
+    .status-open {
+      color: var(--bad);
+      border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+    }
+
+    .status-acknowledged {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+    }
+
+    .status-resolved,
+    .status-closed {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+    }
+
+    .lifecycle {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 10px 0 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .lifecycle .draft-field {
+      margin: 0;
+      width: auto;
+      flex: 1 1 150px;
+      min-width: 120px;
+    }
+
+    .lifecycle .lifecycle-note {
+      flex: 2 1 220px;
+    }
+
+    .chip-sep {
+      display: inline-block;
+      width: 1px;
+      height: 16px;
+      background: var(--border);
+      margin: 0 4px;
+      vertical-align: middle;
+    }
+
+    .audit-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .audit-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      padding: 7px 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    .audit-actor {
+      font-weight: 600;
+    }
+
+    .audit-time {
+      color: var(--muted);
+      margin-left: auto;
+    }
+
+    .audit-note {
+      width: 100%;
+      color: var(--muted);
+      font-style: italic;
+    }
+
     .sev-P4 {
       background: var(--panel-2);
       color: var(--muted);
@@ -945,7 +1035,8 @@
           onclick="switchView('agents')">Agents</button><button class="tab" data-view="rules"
           onclick="switchView('rules')">Rules</button><button class="tab" data-view="integrations"
           onclick="switchView('integrations')">Integrations</button><button class="tab" data-view="kb"
-          onclick="switchView('kb')">Knowledge base</button></div>
+          onclick="switchView('kb')">Knowledge base</button><button class="tab" data-view="audit"
+          onclick="switchView('audit')">Audit</button></div>
       <div id="health" class="health"><span id="conn" class="conn down">connecting…</span></div>
     </div>
   </header>
@@ -1005,6 +1096,15 @@
       <p class="empty">Credentials are configured via environment variables (.env) only — they are never
         entered in the browser, stored in the database, or returned by the API.</p>
       <div id="integrations-list" class="kb-library"><span class="empty">Loading integrations…</span></div>
+    </section>
+  </main>
+  <main id="audit-view" class="hidden">
+    <section>
+      <h2>Audit trail</h2>
+      <p class="empty">Every incident status change, knowledge-base edit and rule change.
+        <strong>Actor is self-asserted</strong> — this API has no authentication, so entries record a
+        claimed name, not a verified identity.</p>
+      <div id="audit-list" class="audit-list"><span class="empty">Loading audit trail…</span></div>
     </section>
   </main>
   <main id="kb-view" class="hidden">
@@ -1231,8 +1331,11 @@
       container.querySelectorAll('.empty').forEach(e => e.remove());
       const row = document.createElement('div');
       const severity = evt.payload.severity || 'P4';
+      const status = evt.payload.status || 'open';
       row.className = 'incident-row';
       row.dataset.severity = severity;
+      row.dataset.status = status;
+      row.id = 'incident-row-' + id;
       const trigger = triggerKind(evt.payload.trigger_source);
       const createdAt = evt.payload.created_at ?? evt.ts;
       row.innerHTML = `<span>
@@ -1240,11 +1343,13 @@
       <span class="trigger-badge trigger-${esc(trigger)}">${trigger === 'event' ? '⚡ event' : 'poll'}</span>
       ${esc(evt.payload.title || evt.payload.object_name)}
       ${evt.payload.external_refs?.servicenow?.number ? `<span class="trigger-badge trigger-event">SNOW ${esc(evt.payload.external_refs.servicenow.number)}</span>` : ''}
+      ${evt.payload.reopen_count ? `<span class="trigger-badge trigger-event">reopened ×${esc(evt.payload.reopen_count)}</span>` : ''}
       <span class="incident-time">${relSpan(createdAt, 'Generated: ')}</span>
     </span>
-    <span class="sev sev-${esc(severity)}">${esc(evt.payload.severity || '—')}</span>`;
+    <span><span class="status-badge status-${esc(status)}">${esc(status.replace('_', ' '))}</span>
+    <span class="sev sev-${esc(severity)}">${esc(evt.payload.severity || '—')}</span></span>`;
       row.onclick = () => loadIncident(id);
-      if (activeFilter && severity !== activeFilter) row.classList.add('filtered');
+      applyRowFilter(row);
       // A serious incident arriving live should catch the eye, once.
       if (live && (severity === 'P1' || severity === 'P2')) row.classList.add('flash');
       container.prepend(row);
@@ -1253,27 +1358,67 @@
 
     // --- severity summary + filters ------------------------------------
     let activeFilter = null;
+    // Default view is live work: finished incidents are hidden until asked for.
+    let statusFilter = 'active';
+    const ACTIVE_STATUSES = ['open', 'acknowledged'];
+
+    function rowIsVisible(row) {
+      if (activeFilter && row.dataset.severity !== activeFilter) return false;
+      if (statusFilter === 'active') return ACTIVE_STATUSES.includes(row.dataset.status);
+      if (statusFilter === 'all') return true;
+      return row.dataset.status === statusFilter;
+    }
+
+    function applyRowFilter(row) {
+      row.classList.toggle('filtered', !rowIsVisible(row));
+    }
 
     function updateSummary() {
       const rows = [...document.querySelectorAll('#incidents .incident-row')];
       const counts = { P1: 0, P2: 0, P3: 0, P4: 0 };
-      rows.forEach(row => { if (counts[row.dataset.severity] !== undefined) counts[row.dataset.severity]++; });
+      let open = 0;
+      rows.forEach(row => {
+        if (counts[row.dataset.severity] !== undefined) counts[row.dataset.severity]++;
+        if (ACTIVE_STATUSES.includes(row.dataset.status)) open++;
+      });
       el('summary').innerHTML = `<span class="pill p1">P1 ${counts.P1}</span><span class="pill p2">P2 ${counts.P2}</span>
-        <span class="pill">P3 ${counts.P3}</span><span class="pill">P4 ${counts.P4}</span><span class="pill">total ${rows.length}</span>`;
+        <span class="pill">P3 ${counts.P3}</span><span class="pill">P4 ${counts.P4}</span>
+        <span class="pill">open ${open}</span><span class="pill" id="mttr-pill"></span>`;
+      loadMetrics();
+    }
+
+    async function loadMetrics() {
+      try {
+        const metrics = await (await fetch('/api/metrics')).json();
+        const pill = el('mttr-pill');
+        if (!pill) return;
+        pill.textContent = metrics.mttr_seconds ? `MTTR ${relDuration(metrics.mttr_seconds)}` : 'MTTR n/a';
+      } catch { /* summary still renders without it */ }
+    }
+
+    function relDuration(seconds) {
+      if (seconds < 60) return `${Math.round(seconds)}s`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+      if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
+      return `${(seconds / 86400).toFixed(1)}d`;
     }
 
     function renderFilters() {
       el('filters').innerHTML = ['P1', 'P2', 'P3', 'P4'].map(sev =>
         `<button class="chip ${activeFilter === sev ? 'on' : ''}" onclick="setFilter('${sev}')">${sev}</button>`).join('')
-        + `<button class="chip ${activeFilter === null ? 'on' : ''}" onclick="setFilter(null)">All</button>`;
+        + `<button class="chip ${activeFilter === null ? 'on' : ''}" onclick="setFilter(null)">All sev</button>`
+        + '<span class="chip-sep"></span>'
+        + [['active', 'Active'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']].map(([value, label]) =>
+          `<button class="chip ${statusFilter === value ? 'on' : ''}" onclick="setStatusFilter('${value}')">${label}</button>`).join('');
     }
 
-    function setFilter(severity) {
-      activeFilter = severity;
+    function refilter() {
       renderFilters();
-      document.querySelectorAll('#incidents .incident-row').forEach(row =>
-        row.classList.toggle('filtered', !!severity && row.dataset.severity !== severity));
+      document.querySelectorAll('#incidents .incident-row').forEach(applyRowFilter);
     }
+
+    function setFilter(severity) { activeFilter = severity; refilter(); }
+    function setStatusFilter(status) { statusFilter = status; refilter(); }
 
     async function loadIncident(id) {
       const res = await fetch('/api/incidents/' + id);
@@ -1286,14 +1431,77 @@
       const diagnosisMode = route === 'ai_failed_rule_only' ? 'failed' : 'ai';
       el('detail').innerHTML = `
     <h3><span class="incident-id">Incident #${esc(data.id)}</span>${esc(data.title)} <span class="sev sev-${esc(data.severity)}">${esc(data.severity)}</span>
-      <span class="trigger-badge trigger-${esc(trigger)}">${trigger === 'event' ? '⚡ event' : 'poll'}</span></h3>
-    <p class="incident-summary">${esc(data.object_name)} (${esc(data.object_type)}) · Generated: ${formatTime(data.created_at)} · $${(data.total_cost_usd || 0).toFixed(5)} total</p>
+      <span class="status-badge status-${esc(data.status || 'open')}">${esc((data.status || 'open').replace('_', ' '))}</span>
+      <span class="trigger-badge trigger-${esc(trigger)}">${trigger === 'event' ? '⚡ event' : 'poll'}</span>
+      ${data.reopen_count ? `<span class="trigger-badge trigger-event">reopened ×${esc(data.reopen_count)}</span>` : ''}</h3>
+    <p class="incident-summary">${esc(data.object_name)} (${esc(data.object_type)}) · Generated: ${formatTime(data.created_at)} · $${(data.total_cost_usd || 0).toFixed(5)} total
+      ${data.previous_incident_id ? `· recurrence of <a href="#" onclick="loadIncident(${esc(data.previous_incident_id)});return false">#${esc(data.previous_incident_id)}</a>` : ''}
+      ${data.assignee ? `· assigned to ${esc(data.assignee)}` : ''}</p>
+    ${renderLifecycleActions(data)}
     <section class="stage"><div class="stage-header"><div><div class="stage-title">1. Collection</div><div class="stage-subtitle">Live MCP observation and deterministic rules</div></div><span class="mode rules">No AI</span></div><div class="stage-body">${renderDetails(data.watcher_json)}</div></section>
     <section class="stage"><div class="stage-header"><div><div class="stage-title">2. Diagnostician</div><div class="stage-subtitle">Root-cause investigation</div></div><span class="mode ${diagnosisMode}">${diagnosisAiStatus}</span></div><div class="stage-body">${renderDetails(data.diagnosis_json)}</div></section>
     <section class="stage"><div class="stage-header"><div><div class="stage-title">3. Report</div><div class="stage-subtitle">Ticket-ready summary and next steps</div></div><span class="mode ${diagnosisMode}">${reportAiStatus}</span></div><div class="stage-body kb-rendered">${renderMarkdown(data.markdown_report || '')}</div></section>
     <div class="kb-section"><h4>Knowledge base</h4><div class="kb-actions"><button class="button" onclick="openKbDraft(${id})">Create KB draft</button></div><div id="kb-articles" class="kb-list"><span class="empty">Loading relevant approved articles…</span></div></div>
+    <div class="kb-section"><h4>Audit trail</h4>
+      <div class="audit-list">${data.audit?.length ? renderAuditRows(data.audit) : '<span class="empty">No recorded actions yet.</span>'}</div>
+    </div>
   `;
       loadKbArticles(id);
+    }
+
+    // --- incident lifecycle --------------------------------------------
+    const NEXT_ACTIONS = {
+      open: [['acknowledged', 'Acknowledge', ''], ['resolved', 'Resolve', ''], ['false_positive', 'False positive', 'danger']],
+      acknowledged: [['resolved', 'Resolve', ''], ['false_positive', 'False positive', 'danger']],
+      resolved: [['closed', 'Close', ''], ['open', 'Reopen', '']],
+      closed: [['open', 'Reopen', '']],
+      false_positive: [['open', 'Reopen', '']],
+    };
+
+    function renderLifecycleActions(data) {
+      const status = data.status || 'open';
+      const actions = NEXT_ACTIONS[status] || [];
+      return `<div class="lifecycle">
+        <input id="lifecycle-actor" class="draft-field lifecycle-actor" placeholder="Your name or team"
+               value="${esc(localStorage.getItem('signalops-actor') || '')}" />
+        <input id="lifecycle-note" class="draft-field lifecycle-note" placeholder="Resolution note (optional)" />
+        <div class="row-actions">${actions.map(([next, label, kind]) =>
+          `<button class="button ${kind}" onclick="setIncidentStatus(${data.id}, '${next}')">${label}</button>`).join('')}</div>
+      </div>`;
+    }
+
+    async function setIncidentStatus(id, status) {
+      const actor = el('lifecycle-actor').value.trim();
+      if (!actor) { toast('Enter your name — it is recorded in the audit trail'); return; }
+      localStorage.setItem('signalops-actor', actor);
+      const note = el('lifecycle-note').value.trim();
+      try {
+        const response = await fetch(`/api/incidents/${id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, actor, note: note || null })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'update failed');
+        toast(`Incident #${id} ${status.replace('_', ' ')}`
+          + (result.servicenow ? ` · ServiceNow ${result.servicenow}` : ''));
+        loadIncident(id);
+        // Resolving is the moment the human knows the answer — ask for the KB
+        // article now rather than hoping they remember later.
+        if (status === 'resolved') openKbDraft(id);
+      } catch (error) { toast(String(error.message)); }
+    }
+
+    function applyIncidentUpdate(payload) {
+      const row = document.getElementById('incident-row-' + payload.incident_id);
+      if (!row) return;
+      row.dataset.status = payload.status;
+      const badge = row.querySelector('.status-badge');
+      if (badge) {
+        badge.className = `status-badge status-${payload.status}`;
+        badge.textContent = payload.status.replace('_', ' ');
+      }
+      applyRowFilter(row);
+      updateSummary();
     }
 
     async function loadKbArticles(id) {
@@ -1534,13 +1742,43 @@
       health.appendChild(fragment);
     }
 
-    const VIEWS = ['dashboard', 'agents', 'rules', 'integrations', 'kb'];
+    const VIEWS = ['dashboard', 'agents', 'rules', 'integrations', 'kb', 'audit'];
     function switchView(view) {
       VIEWS.forEach(name => el(name + '-view').classList.toggle('hidden', name !== view));
       document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.view === view));
       if (view === 'kb') loadKbLibrary();
       if (view === 'rules') loadRules();
       if (view === 'integrations') loadIntegrations();
+      if (view === 'audit') loadAudit();
+    }
+
+    // --- Audit tab -----------------------------------------------------
+    const AUDIT_LABELS = {
+      incident_open: 'reopened', incident_acknowledged: 'acknowledged', incident_resolved: 'resolved',
+      incident_closed: 'closed', incident_false_positive: 'marked false positive',
+      kb_approved: 'approved KB article', kb_edited: 'edited KB article', kb_deleted: 'deleted KB article',
+      rule_created: 'created rule', rule_updated: 'modified rule', rule_deleted: 'deleted rule',
+      rule_disabled: 'disabled rule', rule_reset: 'reset rule',
+    };
+
+    function renderAuditRows(entries) {
+      return entries.map(entry => `<div class="audit-row">
+        <span class="audit-actor">${esc(entry.actor)}</span>
+        <span>${esc(AUDIT_LABELS[entry.action] || entry.action)}</span>
+        <span class="incident-id">${esc(entry.entity_type)} ${esc(entry.entity_id)}</span>
+        <span class="audit-time">${relSpan(entry.ts)}</span>
+        ${entry.detail?.note ? `<div class="audit-note">“${esc(entry.detail.note)}”</div>` : ''}
+      </div>`).join('');
+    }
+
+    async function loadAudit() {
+      const container = el('audit-list');
+      try {
+        const data = await (await fetch('/api/audit?limit=200')).json();
+        container.innerHTML = data.entries.length
+          ? renderAuditRows(data.entries)
+          : '<span class="empty">No recorded actions yet.</span>';
+      } catch { container.innerHTML = '<span class="empty">Audit trail could not be loaded.</span>'; }
     }
 
     // --- Rules tab -----------------------------------------------------
@@ -1840,6 +2078,10 @@
           break;
         case 'incident_created':
           prependIncident(evt, true);
+          break;
+        case 'incident_updated':
+          applyIncidentUpdate(evt.payload);
+          if (evt.payload.reopened) toast(`Incident #${evt.payload.incident_id} reopened by recurrence`);
           break;
       }
     }

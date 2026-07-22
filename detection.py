@@ -239,3 +239,12 @@ class Correlator:
             self._last_seen[finding.fingerprint] = now
             return True
         return False
+
+    def forget(self, fingerprint: str) -> None:
+        """Drop the dedup memory for a fingerprint.
+
+        Called when an incident reaches a terminal state: without this, a
+        condition recurring inside the dedup window after a close would be
+        silently swallowed as a duplicate and never surface again.
+        """
+        self._last_seen.pop(fingerprint, None)

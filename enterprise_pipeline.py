@@ -32,6 +32,10 @@ class EnterprisePipeline:
                                                trend_points=detection_cfg["trend_points"])
         self.correlator = correlator or Correlator(detection_cfg["dedup_window_seconds"])
         self.minimum_ai_severity = detection_cfg["minimum_ai_severity"]
+        # A repeat inside this window after closure reopens the same incident
+        # rather than opening a new one — the flapping guard.
+        self.reopen_window_seconds = detection_cfg.get("reopen_window_seconds", 600)
+        self._previous_incident_id: int | None = None
         self.maximum_ai_calls = detection_cfg["maximum_ai_calls_per_incident"]
         self.kb_search_threshold = knowledge_cfg["similarity_threshold"]
         self.kb_reuse_threshold = knowledge_cfg["zero_ai_reuse_threshold"]
@@ -68,7 +72,24 @@ class EnterprisePipeline:
             "object_name": observation.object_name, "object_type": observation.object_type,
             "status": "anomaly" if finding else "ok", "timestamp": observation.timestamp}
         if not finding: return {"outcome": "healthy", "ai_calls": 0}
-        if not self.correlator.is_new(finding): return {"outcome": "deduplicated", "fingerprint": finding.fingerprint, "ai_calls": 0}
+
+        # Recurrence is decided against the stored incident, not just a timer:
+        # an active incident suppresses indefinitely, a recent terminal one
+        # reopens, and an older one starts a new incident linked to it.
+        decision, previous = self._recurrence(finding)
+        if decision == "suppress":
+            return {"outcome": "deduplicated", "fingerprint": finding.fingerprint,
+                    "incident_id": previous["id"], "ai_calls": 0}
+        if decision == "reopen":
+            store.set_incident_status(previous["id"], "open", actor="system",
+                                      note=f"Recurred: {finding.reason}")
+            bus.publish(Event("incident_updated", {"incident_id": previous["id"], "status": "open",
+                                                   "reopened": True, "severity": previous["severity"],
+                                                   "title": previous["title"]}))
+            logger.info("incident %d reopened by recurrence of %s", previous["id"], finding.fingerprint)
+            return {"outcome": "incident_reopened", "incident_id": previous["id"],
+                    "fingerprint": finding.fingerprint, "ai_calls": 0}
+        self._previous_incident_id = previous["id"] if previous else None
 
         kb_matches = search_kb(f"{finding.reason} {observation.object_name}", self.kb_search_threshold)
         context = await self._historical_context(finding)
@@ -125,6 +146,24 @@ class EnterprisePipeline:
             incident_id = self._save(finding, diagnosis, report, ai_cost, context, "ai_failed_rule_only")
             return {"outcome": "incident_created", "incident_id": incident_id, "route": "ai_failed_rule_only", "ai_calls": 0}
 
+    def _recurrence(self, finding: Finding) -> tuple[str, dict | None]:
+        """Decide what a repeat finding means: suppress, reopen, or create new.
+
+        Returns the decision and the most recent incident for the fingerprint.
+        """
+        previous = store.latest_incident_for_fingerprint(finding.fingerprint)
+        if previous is None:
+            # Nothing on record — the in-memory window is the only guard, and
+            # keeps rapid repeats from racing ahead of the first saved row.
+            return ("new" if self.correlator.is_new(finding) else "suppress"), None
+        if previous["status"] in store.ACTIVE_STATUSES:
+            # One standing condition is one incident until a human finishes it.
+            return "suppress", previous
+        ended = previous.get("closed_at") or previous.get("resolved_at") or previous["created_at"]
+        if time.time() - ended <= self.reopen_window_seconds:
+            return "reopen", previous
+        return "new", previous
+
     async def _historical_context(self, finding: Finding) -> dict:
         splunk, dynatrace = readers_from_env(); result = {}
         service = finding.observation.labels.get("service", finding.observation.object_name)
@@ -161,7 +200,8 @@ class EnterprisePipeline:
             severity=severity, title=title,
             markdown_report=report.get("markdown_report", ""), watcher_json=snapshot, diagnosis_json=diagnosis,
             report_json=report | {"route": route}, total_cost_usd=cost, trigger_source=finding.observation.source,
-            created_at=created_at)
+            created_at=created_at, fingerprint=finding.fingerprint,
+            previous_incident_id=self._previous_incident_id)
         # The dashboard renders this row directly, so it must carry everything
         # /api/incidents would return — otherwise a live row shows a blank
         # severity until a reload replaces it with the stored version.
@@ -170,6 +210,9 @@ class EnterprisePipeline:
                                                "object_name": finding.observation.object_name,
                                                "object_type": finding.observation.object_type,
                                                "severity_source": finding.severity_source,
+                                               "status": "open",
+                                               "previous_incident_id": self._previous_incident_id,
                                                "trigger_source": finding.observation.source,
                                                "created_at": created_at}))
+        self._previous_incident_id = None  # consumed; do not leak into the next incident
         return incident_id
