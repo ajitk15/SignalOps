@@ -70,26 +70,58 @@ class User(Base):
     email = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
     role = Column(Enum(Role), nullable=False, default=Role.viewer)
+    # Argon2 hash. Nullable because accounts created before passwords existed,
+    # and because an invited user has none until they set one.
+    password_hash = Column(String, nullable=True)
+    # Deactivating rather than deleting: a removed user would orphan the audit
+    # entries and approvals that name them, which is the opposite of what an
+    # audit trail is for.
+    active = Column(Boolean, nullable=False, default=True)
+    must_change_password = Column(Boolean, nullable=False, default=False)
+    failed_logins = Column(Integer, nullable=False, default=0)
+    locked_until = Column(Float, nullable=True)
     created_at = Column(Float, nullable=False, default=time.time)
     last_login_at = Column(Float, nullable=True)
-    # False while the dummy provider is in use. Carried into audit entries so a
-    # claimed identity is never displayed as a verified one.
+    # True once a password has actually been checked. Carried into audit
+    # entries so a claimed identity is never displayed as a verified one.
     identity_verified = Column(Boolean, nullable=False, default=False)
 
     workspace = relationship("Workspace", back_populates="users")
 
 
+Index("ix_user_email", User.workspace_id, User.email, unique=True)
+
+
 class Connection(Base):
-    """A configured external system. Secrets are NOT stored here — config holds
-    references to environment variable names, never their values."""
+    """One configured external system — one ServiceNow instance, one repository.
+
+    Several of a kind are expected: a dev instance and a production one are
+    different connections, and a workflow names the one it uses. That is why
+    credentials live here rather than in the environment, where a single
+    SN_READ_USER could only ever describe one instance.
+
+    `secrets` holds encrypted values (see crypto.py) and is never returned by
+    any endpoint — the API reports which secrets are set, never what they are.
+    `config` holds everything non-secret: instance URL, auth type, the queue to
+    poll.
+    """
     __tablename__ = "connection"
     id = Column(String, primary_key=True, default=_uuid)
     workspace_id = Column(String, ForeignKey("workspace.id"), nullable=False)
     kind = Column(String, nullable=False)          # servicenow | jira | git
     name = Column(String, nullable=False)
     config = Column(JSON, nullable=False, default=dict)
+    secrets = Column(JSON, nullable=True)          # encrypted at rest
     enabled = Column(Boolean, nullable=False, default=True)
+    last_tested_at = Column(Float, nullable=True)
+    last_test_ok = Column(Boolean, nullable=True)
+    last_test_detail = Column(Text, nullable=True)
     created_at = Column(Float, nullable=False, default=time.time)
+    created_by = Column(String, ForeignKey("user.id"), nullable=True)
+
+
+Index("ix_connection_name", Connection.workspace_id, Connection.kind,
+      Connection.name, unique=True)
 
 
 class Workflow(Base):

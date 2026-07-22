@@ -1,10 +1,21 @@
 """Authentication and authorisation.
 
-The split that matters here: **authentication is a stub, authorisation is real.**
-DummyAuthProvider accepts whoever you say you are, but every route still checks
-roles and workspace scope server-side. That way swapping in OIDC later replaces
-one class and changes nothing downstream — and the permission model is exercised
-from day one rather than bolted on once it is load-bearing.
+Authentication is now real: an email address and an Argon2-hashed password.
+Authorisation always was — every route checks roles and workspace scope
+server-side, which is why swapping the provider changed nothing downstream. The
+`AuthProvider` seam stays, so OIDC replaces one class when it arrives.
+
+Argon2id rather than bcrypt or PBKDF2: it is the current password-hashing
+competition winner and is memory-hard, which is the property that matters
+against the hardware an attacker actually rents. The library picks parameters
+and re-hashes on login when they change, so raising the cost later needs no
+migration.
+
+Two behaviours worth knowing. Login does not say whether it was the email or
+the password that was wrong, because "no such user" is an account-enumeration
+oracle. And repeated failures lock an account briefly rather than forever — a
+permanent lock is a denial-of-service anyone can trigger by guessing at
+somebody else's email.
 """
 from __future__ import annotations
 
@@ -34,6 +45,95 @@ class AuthProvider(Protocol):
     verifies_identity: bool
 
     def login(self, session, workspace_id: str, **claims) -> User: ...
+
+
+MAX_FAILED_LOGINS = 5
+LOCKOUT_SECONDS = 300
+MIN_PASSWORD_LENGTH = 10
+
+
+class InvalidCredentials(Exception):
+    """Wrong email, wrong password, inactive or locked — deliberately one type.
+
+    Distinguishing them to the caller is an enumeration oracle: an attacker
+    with a list of addresses learns which ones exist without ever logging in.
+    """
+
+
+class PasswordPolicy(Exception):
+    """The proposed password is not acceptable."""
+
+
+def hash_password(password: str) -> str:
+    if len(password or "") < MIN_PASSWORD_LENGTH:
+        raise PasswordPolicy(
+            f"Use at least {MIN_PASSWORD_LENGTH} characters. Length is what makes a "
+            "password expensive to guess; composition rules mostly make it hard to "
+            "remember.")
+    return _hasher().hash(password)
+
+
+def _hasher():
+    from argon2 import PasswordHasher
+    global _password_hasher
+    if _password_hasher is None:
+        _password_hasher = PasswordHasher()
+    return _password_hasher
+
+
+_password_hasher = None
+
+
+class PasswordAuthProvider:
+    """Email and password, checked against an Argon2 hash."""
+
+    name = "password"
+    verifies_identity = True
+
+    def login(self, session, workspace_id: str, *, email: str,
+              password: str, **_) -> User:
+        from argon2.exceptions import InvalidHashError, VerifyMismatchError
+
+        email = (email or "").strip().lower()
+        user = (session.query(User)
+                .filter(User.workspace_id == workspace_id, User.email == email)
+                .one_or_none())
+
+        if user is None:
+            # Spend roughly the time a real verification costs, so a missing
+            # account is not detectable by how fast the answer comes back.
+            _hasher().hash("timing-equalisation")
+            raise InvalidCredentials("email or password is incorrect")
+        if not user.active:
+            raise InvalidCredentials("email or password is incorrect")
+        if user.locked_until and time.time() < user.locked_until:
+            remaining = int(user.locked_until - time.time())
+            raise InvalidCredentials(
+                f"too many failed attempts; try again in {remaining} seconds")
+        if not user.password_hash:
+            raise InvalidCredentials("email or password is incorrect")
+
+        try:
+            _hasher().verify(user.password_hash, password or "")
+        except (VerifyMismatchError, InvalidHashError):
+            user.failed_logins = (user.failed_logins or 0) + 1
+            if user.failed_logins >= MAX_FAILED_LOGINS:
+                # Temporary, not permanent: a lock that never lifts is a denial
+                # of service anyone can trigger against anyone else's address.
+                user.locked_until = time.time() + LOCKOUT_SECONDS
+                user.failed_logins = 0
+                logger.warning("locked %s after repeated failed logins", email)
+            raise InvalidCredentials("email or password is incorrect")
+
+        if _hasher().check_needs_rehash(user.password_hash):
+            # Parameters were raised since this hash was made; upgrade it now
+            # that the plaintext is in hand, which is the only moment it can be.
+            user.password_hash = _hasher().hash(password)
+        user.failed_logins = 0
+        user.locked_until = None
+        user.identity_verified = True
+        user.last_login_at = time.time()
+        return user
 
 
 class DummyAuthProvider:
@@ -67,11 +167,21 @@ class DummyAuthProvider:
         return user
 
 
-_provider: AuthProvider = DummyAuthProvider()
+# Password auth is the default now. SIGNALOPS_AUTH=dummy brings back the stub
+# for a demo, and the startup tripwire still refuses to run it outside local.
+_provider: AuthProvider = (DummyAuthProvider() if os.getenv("SIGNALOPS_AUTH") == "dummy"
+                           else PasswordAuthProvider())
 
 
 def provider() -> AuthProvider:
     return _provider
+
+
+def set_password(user: User, password: str) -> None:
+    user.password_hash = hash_password(password)
+    user.must_change_password = False
+    user.failed_logins = 0
+    user.locked_until = None
 
 
 def issue_session(user: User) -> str:
@@ -106,6 +216,7 @@ class Principal:
                 "email": self.user.email, "role": self.user.role.value,
                 # Surfaced so the UI can say plainly that identity is unverified.
                 "identity_verified": self.user.identity_verified,
+                "must_change_password": bool(self.user.must_change_password),
                 "auth_provider": _provider.name,
                 "workspace": {"id": self.workspace.id, "name": self.workspace.name,
                               "killswitch": self.workspace.killswitch}}
@@ -120,6 +231,10 @@ def current_principal(signalops_session: str | None = Cookie(default=None)) -> P
         workspace = session.get(Workspace, data.get("ws"))
         if user is None or workspace is None or user.workspace_id != workspace.id:
             raise HTTPException(status_code=401, detail="session no longer valid")
+        if not user.active:
+            # Deactivation has to take effect on the next request, not the next
+            # login, or revoking access means nothing while a session is open.
+            raise HTTPException(status_code=401, detail="this account is deactivated")
         return Principal(user, workspace)
 
 

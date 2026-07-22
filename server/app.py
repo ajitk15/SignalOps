@@ -31,8 +31,9 @@ from agents import export as agent_export  # noqa: E402
 from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
 from agents.catalogue import get as catalogue_get  # noqa: E402
 from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
-from auth import (SESSION_COOKIE, Principal, current_principal, issue_session,  # noqa: E402
-                  provider, record_login, require_role)
+from auth import (SESSION_COOKIE, InvalidCredentials, PasswordPolicy,  # noqa: E402
+                  Principal, current_principal, hash_password, issue_session,
+                  provider, record_login, require_role, set_password)
 from db import audit, audit_entries, init_db, session_scope  # noqa: E402
 from engine import workflow_export  # noqa: E402
 from engine.approvals import StaleApproval  # noqa: E402
@@ -43,7 +44,7 @@ from engine.state import Halted  # noqa: E402
 from integrations import servicenow  # noqa: E402
 from events import Event, bus  # noqa: E402
 from models import (AgentConfig, Approval, ApprovalStatus, Connection,  # noqa: E402
-                    Role, Run, RunStatus, RunStep, Workflow, Workspace)
+                    Role, Run, RunStatus, RunStep, User, Workflow, Workspace)
 
 # Which tools sit at each tier — shown in the UI so the envelope is legible.
 TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
@@ -115,26 +116,84 @@ async def health() -> dict:
 # --- authentication ----------------------------------------------------------
 
 class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    password: str = Field(min_length=1, max_length=300)
+
+
+class BootstrapRequest(BaseModel):
+    """The first administrator. Accepted only while no user exists."""
+    email: str = Field(min_length=3, max_length=200)
     display_name: str = Field(min_length=1, max_length=80)
-    role: Role = Role.operator
+    password: str = Field(min_length=1, max_length=300)
+
+
+@app.get("/api/auth/state")
+async def auth_state() -> dict:
+    """What the login screen needs before anyone has signed in.
+
+    `needs_bootstrap` is why this is unauthenticated: a fresh install has no
+    account to sign in with, and the alternative to a first-run screen is a
+    seeded default password, which is a published credential.
+    """
+    with session_scope() as session:
+        any_user = session.query(User).first() is not None
+    return {"needs_bootstrap": not any_user,
+            "provider": provider().name,
+            "verifies_identity": provider().verifies_identity}
+
+
+@app.post("/api/auth/bootstrap")
+async def bootstrap(payload: BootstrapRequest, response: Response) -> dict:
+    """Create the first administrator. Refused once any user exists."""
+    with session_scope() as session:
+        if session.query(User).first() is not None:
+            # Not 403: the endpoint stops existing in a meaningful sense once
+            # there is somebody to authenticate as.
+            raise HTTPException(status_code=409,
+                                detail="this workspace already has users; sign in instead")
+        try:
+            hashed = hash_password(payload.password)
+        except PasswordPolicy as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        user = User(workspace_id=WORKSPACE_ID, email=payload.email.strip().lower(),
+                    display_name=payload.display_name.strip(), role=Role.admin,
+                    password_hash=hashed, identity_verified=True,
+                    last_login_at=time.time())
+        session.add(user)
+        session.flush()
+        workspace = session.get(Workspace, WORKSPACE_ID)
+        principal = Principal(user, workspace)
+        token = issue_session(user)
+        audit(session, actor=user.display_name, action="workspace_bootstrapped",
+              entity_type="user", entity_id=user.id, workspace_id=WORKSPACE_ID,
+              actor_verified=True, detail={"email": user.email})
+        view = principal.as_dict()
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
+    return view
 
 
 @app.post("/api/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict:
-    """Dummy login: whoever you say you are, with the role you pick.
-
-    Deliberately trivial — see auth.DummyAuthProvider. The session, roles and
-    audit trail it produces are real.
-    """
     with session_scope() as session:
-        user = provider().login(session, WORKSPACE_ID,
-                                display_name=payload.display_name, role=payload.role)
+        try:
+            user = provider().login(session, WORKSPACE_ID, email=payload.email,
+                                    password=payload.password,
+                                    display_name=payload.email.split("@")[0])
+        except InvalidCredentials as error:
+            # Audited by email rather than by user, because the interesting
+            # case is failures against an address that does not exist.
+            audit(session, actor=payload.email[:120], action="login_failed",
+                  entity_type="user", entity_id="-", workspace_id=WORKSPACE_ID,
+                  actor_verified=False)
+            session.commit()
+            raise HTTPException(status_code=401, detail=str(error)) from error
         record_login(session, user, WORKSPACE_ID)
         workspace = session.get(Workspace, WORKSPACE_ID)
         principal = Principal(user, workspace)
         token = issue_session(user)
+        view = principal.as_dict()
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
-    return principal.as_dict()
+    return view
 
 
 @app.post("/api/auth/logout")
@@ -146,6 +205,158 @@ async def logout(response: Response) -> dict:
 @app.get("/api/auth/me")
 async def me(principal: Principal = Depends(current_principal)) -> dict:
     return principal.as_dict()
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=300)
+    new_password: str = Field(min_length=1, max_length=300)
+
+
+@app.post("/api/auth/password")
+async def change_password(payload: PasswordChangeRequest,
+                          principal: Principal = Depends(current_principal)) -> dict:
+    """Change your own password. The current one is required.
+
+    Even though the session already proves who you are: an unattended browser
+    is the common case, and re-asking is what stops it becoming an account
+    takeover.
+    """
+    with session_scope() as session:
+        user = session.get(User, principal.user.id)
+        try:
+            provider().login(session, principal.workspace_id, email=user.email,
+                             password=payload.current_password)
+        except InvalidCredentials as error:
+            raise HTTPException(status_code=403,
+                                detail="current password is incorrect") from error
+        try:
+            set_password(user, payload.new_password)
+        except PasswordPolicy as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        audit(session, actor=user.display_name, action="password_changed",
+              entity_type="user", entity_id=user.id,
+              workspace_id=principal.workspace_id, actor_verified=True)
+    return {"status": "changed"}
+
+
+# --- user administration -----------------------------------------------------
+
+class UserRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    display_name: str = Field(min_length=1, max_length=80)
+    role: Role = Role.viewer
+    password: str = Field(min_length=1, max_length=300)
+
+
+class UserUpdateRequest(BaseModel):
+    display_name: str | None = Field(default=None, max_length=80)
+    role: Role | None = None
+    active: bool | None = None
+    # Set by an admin, which forces a change at next login rather than leaving
+    # a password only the admin chose in place indefinitely.
+    password: str | None = Field(default=None, max_length=300)
+
+
+def _user_view(user: User) -> dict:
+    return {"id": user.id, "email": user.email, "display_name": user.display_name,
+            "role": user.role.value, "active": user.active,
+            "must_change_password": bool(user.must_change_password),
+            "has_password": bool(user.password_hash),
+            "locked": bool(user.locked_until and user.locked_until > time.time()),
+            "last_login_at": user.last_login_at, "created_at": user.created_at}
+
+
+@app.get("/api/users")
+async def list_users(principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        rows = [_user_view(u) for u in session.query(User)
+                .filter(User.workspace_id == principal.workspace_id)
+                .order_by(User.created_at).all()]
+    return {"users": rows, "roles": [r.value for r in Role]}
+
+
+@app.post("/api/users")
+async def create_user(payload: UserRequest,
+                      principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        email = payload.email.strip().lower()
+        if (session.query(User)
+                .filter(User.workspace_id == principal.workspace_id,
+                        User.email == email).first()):
+            raise HTTPException(status_code=409, detail="that email already has an account")
+        try:
+            hashed = hash_password(payload.password)
+        except PasswordPolicy as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        user = User(workspace_id=principal.workspace_id, email=email,
+                    display_name=payload.display_name.strip(), role=payload.role,
+                    password_hash=hashed,
+                    # The admin knows this password, so it is a handover
+                    # credential and not the user's own until they change it.
+                    must_change_password=True)
+        session.add(user)
+        session.flush()
+        audit(session, actor=principal.user.display_name, action="user_created",
+              entity_type="user", entity_id=user.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"email": email, "role": payload.role.value})
+        view = _user_view(user)
+    return view
+
+
+@app.put("/api/users/{user_id}")
+async def update_user(user_id: str, payload: UserUpdateRequest,
+                      principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        user = session.get(User, user_id)
+        if user is None or user.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown user")
+
+        changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+        demoting = "role" in changes and changes["role"] is not Role.admin
+        deactivating = changes.get("active") is False
+        if user.id == principal.user.id and (demoting or deactivating):
+            # Locking yourself out is recoverable only by editing the database.
+            raise HTTPException(
+                status_code=409,
+                detail="you cannot remove your own admin access or deactivate yourself")
+        if (demoting or deactivating) and _last_active_admin(session, user):
+            raise HTTPException(
+                status_code=409,
+                detail="this is the last active admin; promote someone else first")
+
+        if payload.display_name is not None:
+            user.display_name = payload.display_name.strip()
+        if payload.role is not None:
+            user.role = payload.role
+        if payload.active is not None:
+            user.active = payload.active
+        if payload.password:
+            try:
+                set_password(user, payload.password)
+            except PasswordPolicy as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            user.must_change_password = True
+        audit(session, actor=principal.user.display_name, action="user_updated",
+              entity_type="user", entity_id=user_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              # Never record the password, only that one was set.
+              detail={k: (True if k == "password" else str(v))
+                      for k, v in changes.items()})
+        view = _user_view(user)
+    return view
+
+
+def _last_active_admin(session, user: User) -> bool:
+    if user.role is not Role.admin or not user.active:
+        return False
+    others = (session.query(User)
+              .filter(User.workspace_id == user.workspace_id,
+                      User.role == Role.admin, User.active.is_(True),
+                      User.id != user.id).count())
+    return others == 0
 
 
 # --- workspace controls ------------------------------------------------------
@@ -345,6 +556,10 @@ class WorkflowRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dry_run: bool = True
     run_budget_usd: float = Field(default=1.0, gt=0, le=100)
+    # Which stored ServiceNow instance this workflow reads and writes. Naming a
+    # connection rather than reading the environment is what lets one
+    # installation drive several instances.
+    connection_id: str | None = None
 
 
 def _workflow_view(workflow: Workflow) -> dict:
@@ -354,9 +569,11 @@ def _workflow_view(workflow: Workflow) -> dict:
             "created_at": workflow.created_at,
             "exportable": workflow.template in workflow_export.TEMPLATES,
             "polling": bool(workflow.config.get("poll_enabled")),
-            # The UI needs to explain *why* Enable is unavailable, not just
-            # grey it out.
-            "can_enable": bool(workflow.dry_run_passed_at)}
+            "connection_id": workflow.config.get("connection_id"),
+            "require_outcome_report": workflow.config.get("require_outcome_report", True),
+            # Not a gate any more, but still worth showing: a workflow nobody
+            # has watched run is a different thing from one that has been.
+            "tested": bool(workflow.dry_run_passed_at)}
 
 
 @app.get("/api/workflows")
@@ -380,7 +597,13 @@ async def create_workflow(payload: WorkflowRequest,
         workflow = Workflow(workspace_id=principal.workspace_id, template=payload.template,
                             name=payload.name, created_by=principal.user.id,
                             config={"dry_run": payload.dry_run,
-                                    "run_budget_usd": payload.run_budget_usd})
+                                    "run_budget_usd": payload.run_budget_usd,
+                                    "connection_id": payload.connection_id,
+                                    # On by default: a ticket resolved because a
+                                    # plan was approved, rather than because
+                                    # somebody ran it, is the failure worth
+                                    # defaulting against.
+                                    "require_outcome_report": True})
         session.add(workflow)
         session.flush()
         audit(session, actor=principal.user.display_name, action="workflow_created",
@@ -440,11 +663,12 @@ async def enable_workflow(workflow_id: str, payload: EnableRequest,
         workflow = session.get(Workflow, workflow_id)
         if workflow is None or workflow.workspace_id != principal.workspace_id:
             raise HTTPException(status_code=404, detail="unknown workflow")
-        if payload.enabled and not workflow.dry_run_passed_at:
-            raise HTTPException(
-                status_code=409,
-                detail="This workflow has not completed a dry run yet. Run one first: "
-                       "it executes against a real ticket and writes nothing.")
+        # Deliberately not a hard gate any more. Requiring a dry run before
+        # every enable was ceremony on the common path — the meaningful
+        # protections are that dry run is the default mode and that every run
+        # stops at a human gate. The warning is still returned so "I have never
+        # seen this run" stays visible.
+        untested = payload.enabled and not workflow.dry_run_passed_at
         workflow.enabled = payload.enabled
         workflow.config = {**workflow.config, "poll_enabled": payload.poll_enabled}
         audit(session, actor=principal.user.display_name,
@@ -452,10 +676,13 @@ async def enable_workflow(workflow_id: str, payload: EnableRequest,
               entity_type="workflow", entity_id=workflow_id,
               workspace_id=principal.workspace_id,
               actor_verified=principal.user.identity_verified,
-              detail={"polling": payload.poll_enabled})
+              detail={"polling": payload.poll_enabled, "untested": untested})
         view = _workflow_view(workflow)
     await poller.sync()
-    return view
+    return {**view, "warning": (
+        "Enabled without a test run. It will run in dry-run mode and stop at the "
+        "human gate, but you have not yet seen what it produces."
+        if untested else None)}
 
 
 class WorkflowConfigRequest(BaseModel):
@@ -471,6 +698,10 @@ class WorkflowConfigRequest(BaseModel):
     base_branch: str | None = Field(default=None, max_length=100)
     test_command: str | None = Field(default=None, max_length=500)
     allow_dependency_changes: bool | None = None
+    connection_id: str | None = Field(default=None, max_length=64)
+    # Off means a run ends at hand-off and the ticket is left open for a human
+    # to close in ServiceNow.
+    require_outcome_report: bool | None = None
 
 
 @app.put("/api/workflows/{workflow_id}/config")
@@ -481,10 +712,6 @@ async def configure_workflow(workflow_id: str, payload: WorkflowConfigRequest,
         if workflow is None or workflow.workspace_id != principal.workspace_id:
             raise HTTPException(status_code=404, detail="unknown workflow")
         changes = payload.model_dump(exclude_unset=True, exclude_none=True)
-        if changes.get("dry_run") is False and not workflow.dry_run_passed_at:
-            raise HTTPException(
-                status_code=409,
-                detail="Leave dry run on until a dry run has succeeded.")
         workflow.config = {**workflow.config, **changes}
         audit(session, actor=principal.user.display_name, action="workflow_configured",
               entity_type="workflow", entity_id=workflow_id,
@@ -494,69 +721,230 @@ async def configure_workflow(workflow_id: str, payload: WorkflowConfigRequest,
     return view
 
 
+
+class _DetachedConnection:
+    """A connection's settings, copied out of the session that loaded them.
+
+    Testing a connection makes network calls that can take seconds; holding a
+    database session open across them would pin a connection from the pool for
+    no reason.
+    """
+
+    def __init__(self, connection) -> None:
+        self.name = connection.name
+        self.config = dict(connection.config or {})
+        self.secrets = dict(connection.secrets or {})
+
+
 # --- connections -------------------------------------------------------------
 
 class ConnectionRequest(BaseModel):
-    """No credential fields, deliberately.
+    """A ServiceNow instance, named, with its own credentials.
 
-    Secrets come from the environment. A form that accepted a password and
-    promised not to store it would be a weaker guarantee than a form that has
-    nowhere to put one.
+    Credentials are accepted here and encrypted at rest (see crypto.py). That
+    is a deliberate reversal of the earlier env-only design: several instances
+    cannot be described by one set of environment variables, and a platform
+    that manages connections has to be able to hold their credentials. What
+    does not change is that no endpoint ever returns them.
     """
     kind: str = "servicenow"
     name: str = Field(min_length=1, max_length=80)
-    filter_query: str = Field(default="", max_length=1000)
+    base_url: str = Field(min_length=1, max_length=300)
+    auth_type: str = Field(default="basic", pattern="^(basic|oauth)$")
+    username: str = Field(default="", max_length=120)
+    password: str | None = Field(default=None, max_length=300)
+    client_id: str | None = Field(default=None, max_length=200)
+    client_secret: str | None = Field(default=None, max_length=300)
+    # The queue this connection watches. An operations team thinks in queues,
+    # so this is the field the trigger is built from.
+    assignment_group: str = Field(default="", max_length=120)
+    extra_query: str = Field(default="", max_length=500)
+
+
+def _connection_view(connection) -> dict:
+    from crypto import present
+    config = dict(connection.config or {})
+    return {
+        "id": connection.id, "kind": connection.kind, "name": connection.name,
+        "base_url": config.get("base_url", ""),
+        "auth_type": config.get("auth_type", "basic"),
+        "username": config.get("username", ""),
+        "client_id": config.get("client_id", ""),
+        "assignment_group": config.get("assignment_group", ""),
+        "extra_query": config.get("extra_query", ""),
+        "enabled": connection.enabled,
+        # Presence only. There is no endpoint that returns a stored secret.
+        "secrets_set": present(connection.secrets),
+        "last_tested_at": connection.last_tested_at,
+        "last_test_ok": connection.last_test_ok,
+        "last_test_detail": connection.last_test_detail,
+    }
 
 
 @app.get("/api/connections")
 async def list_connections(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
     with session_scope() as session:
-        rows = [{"id": c.id, "kind": c.kind, "name": c.name, "config": c.config,
-                 "enabled": c.enabled}
-                for c in session.query(Connection)
-                .filter(Connection.workspace_id == principal.workspace_id).all()]
+        rows = [_connection_view(c) for c in session.query(Connection)
+                .filter(Connection.workspace_id == principal.workspace_id)
+                .order_by(Connection.created_at).all()]
     return {
         "connections": rows,
-        # Presence only. Values are never returned, and there is no endpoint
-        # that would return them.
+        # The environment path still works and is reported, so an existing
+        # setup keeps running and it is obvious which source is in play.
         "environment": servicenow.env_status(),
-        "missing_for_reads": servicenow.missing_env(for_writes=False),
-        "missing_for_writes": servicenow.missing_env(for_writes=True),
-        "auth_method": servicenow.auth_method(),
+        "environment_auth_method": servicenow.auth_method(),
+        "environment_usable": not servicenow.missing_env(for_writes=False),
     }
+
+
+def _apply_connection(connection, payload: ConnectionRequest) -> None:
+    from crypto import encrypt
+    connection.name = payload.name
+    connection.kind = payload.kind
+    connection.config = {
+        "base_url": payload.base_url.rstrip("/"),
+        "auth_type": payload.auth_type,
+        "username": payload.username.strip(),
+        "client_id": (payload.client_id or "").strip(),
+        "assignment_group": payload.assignment_group.strip(),
+        "extra_query": payload.extra_query.strip(),
+    }
+    secrets = dict(connection.secrets or {})
+    # An omitted secret leaves the stored one alone, so editing a queue name
+    # does not require retyping a password nobody can read back.
+    for field, value in (("password", payload.password),
+                         ("client_secret", payload.client_secret)):
+        if value:
+            secrets[field] = encrypt(value)
+    connection.secrets = secrets
 
 
 @app.post("/api/connections")
 async def create_connection(payload: ConnectionRequest,
                             principal: Principal = Depends(require_role(Role.admin))) -> dict:
     with session_scope() as session:
-        connection = Connection(workspace_id=principal.workspace_id, kind=payload.kind,
-                                name=payload.name,
-                                config={"filter_query": payload.filter_query})
+        clash = (session.query(Connection)
+                 .filter(Connection.workspace_id == principal.workspace_id,
+                         Connection.kind == payload.kind,
+                         Connection.name == payload.name).first())
+        if clash is not None:
+            raise HTTPException(status_code=409,
+                                detail=f"a {payload.kind} connection named "
+                                       f"{payload.name!r} already exists")
+        connection = Connection(workspace_id=principal.workspace_id,
+                                created_by=principal.user.id)
+        _apply_connection(connection, payload)
         session.add(connection)
         session.flush()
         audit(session, actor=principal.user.display_name, action="connection_created",
               entity_type="connection", entity_id=connection.id,
               workspace_id=principal.workspace_id,
               actor_verified=principal.user.identity_verified,
-              detail={"kind": payload.kind, "name": payload.name})
-        view = {"id": connection.id, "kind": connection.kind, "name": connection.name,
-                "config": connection.config, "enabled": connection.enabled}
+              # The instance and account are recorded; the credential is not.
+              detail={"kind": payload.kind, "name": payload.name,
+                      "base_url": payload.base_url, "auth_type": payload.auth_type,
+                      "assignment_group": payload.assignment_group})
+        view = _connection_view(connection)
     return view
 
 
+@app.put("/api/connections/{connection_id}")
+async def update_connection(connection_id: str, payload: ConnectionRequest,
+                            principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        if connection is None or connection.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown connection")
+        _apply_connection(connection, payload)
+        audit(session, actor=principal.user.display_name, action="connection_updated",
+              entity_type="connection", entity_id=connection_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"name": payload.name,
+                      "assignment_group": payload.assignment_group})
+        view = _connection_view(connection)
+    return view
+
+
+@app.delete("/api/connections/{connection_id}")
+async def delete_connection(connection_id: str,
+                            principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        if connection is None or connection.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown connection")
+        in_use = [w.name for w in session.query(Workflow)
+                  .filter(Workflow.workspace_id == principal.workspace_id).all()
+                  if (w.config or {}).get("connection_id") == connection_id]
+        if in_use:
+            # Deleting it would leave those workflows pointing at nothing and
+            # failing at run time rather than here.
+            raise HTTPException(
+                status_code=409,
+                detail=f"still used by: {', '.join(in_use)}. Point them elsewhere first.")
+        session.delete(connection)
+        audit(session, actor=principal.user.display_name, action="connection_deleted",
+              entity_type="connection", entity_id=connection_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified)
+    return {"status": "deleted", "id": connection_id}
+
+
+@app.post("/api/connections/{connection_id}/test")
+async def test_stored_connection(
+        connection_id: str,
+        principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """Prove the credentials work, and remember the answer.
+
+    The result is stored on the connection so the list shows what happened last
+    time — a connection that broke overnight should be visible without someone
+    thinking to re-test it.
+    """
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        if connection is None or connection.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown connection")
+        probe = _DetachedConnection(connection)
+
+    ok, detail, queue_count = True, "", None
+    try:
+        client = servicenow.client_from(probe)
+        await asyncio.to_thread(client.test)
+        detail = f"Connected using {client.auth_method} authentication."
+        group = probe.config.get("assignment_group")
+        if group:
+            rows = await asyncio.to_thread(
+                client.search_incidents, servicenow.queue_query(probe), 5)
+            queue_count = len(rows)
+            detail += (f" Queue {group!r} currently matches {queue_count} active "
+                       f"incident(s).")
+    except Exception as error:                          # noqa: BLE001
+        ok, detail = False, str(error)
+
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        connection.last_tested_at = time.time()
+        connection.last_test_ok = ok
+        connection.last_test_detail = detail[:2000]
+        audit(session, actor=principal.user.display_name,
+              action="connection_tested", entity_type="connection",
+              entity_id=connection_id, workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified, detail={"ok": ok})
+    return {"ok": ok, "detail": detail, "queue_matches": queue_count}
+
+
 @app.post("/api/connections/test")
-async def test_connection(principal: Principal = Depends(require_role(Role.operator))) -> dict:
-    """Prove the credentials work before a workflow depends on them."""
+async def test_environment_connection(
+        principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """The environment-variable path, kept working for existing setups."""
     missing = servicenow.missing_env(for_writes=False)
     if missing:
-        return {"ok": False, "detail": f"missing environment variables: {', '.join(missing)}"}
+        return {"ok": False,
+                "detail": f"missing environment variables: {', '.join(missing)}"}
     client = servicenow.reader()
     try:
         await asyncio.to_thread(client.test)
     except servicenow.ServiceNowError as error:
-        # The message explains what a 401 might actually mean; passing it
-        # through is the point, since "failed" alone sends people hunting.
         return {"ok": False, "detail": str(error), "auth_method": client.auth_method}
     return {"ok": True,
             "detail": f"Read credentials work ({client.auth_method} authentication).",

@@ -218,10 +218,11 @@ class ResolutionTests(unittest.TestCase):
     def test_an_approved_plan_alone_does_not_resolve_the_ticket(self):
         """Approving a plan and having run it are different facts. Only the
         second can justify closing an incident."""
-        client = FakeClient()
+        fake = FakeClient()
+        client = fake
         harness = _Harness(self)
-        harness.engine._sink_factory = lambda *, dry_run: servicenow.TicketSink(
-            dry_run=False, client=client)
+        harness.engine._sink_factory = lambda *, dry_run, client=None: servicenow.TicketSink(
+            dry_run=False, client=fake)
         run_id = harness.engine.start(workflow_id=harness.workflow_id,
                                       ticket={**TICKET, "sys_id": "abc"}, actor="tester")
         harness.wait(run_id, "awaiting_approval")
@@ -232,10 +233,11 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual([c[0] for c in client.calls], ["work_note"])
 
     def test_a_reported_success_resolves_the_ticket(self):
-        client = FakeClient()
+        fake = FakeClient()
+        client = fake
         harness = _Harness(self)
-        harness.engine._sink_factory = lambda *, dry_run: servicenow.TicketSink(
-            dry_run=False, client=client)
+        harness.engine._sink_factory = lambda *, dry_run, client=None: servicenow.TicketSink(
+            dry_run=False, client=fake)
         run_id = harness.engine.start(workflow_id=harness.workflow_id,
                                       ticket={**TICKET, "sys_id": "abc"}, actor="tester")
         harness.wait(run_id, "awaiting_approval")
@@ -247,10 +249,11 @@ class ResolutionTests(unittest.TestCase):
         self.assertIn("channel came back", client.calls[1][3])
 
     def test_a_dry_run_resolves_nothing_even_when_reported_successful(self):
-        client = FakeClient()
+        fake = FakeClient()
+        client = fake
         harness = _Harness(self)
-        harness.engine._sink_factory = lambda *, dry_run: servicenow.TicketSink(
-            dry_run=dry_run, client=client)
+        harness.engine._sink_factory = lambda *, dry_run, client=None: servicenow.TicketSink(
+            dry_run=dry_run, client=fake)
         run_id = harness.engine.start(workflow_id=harness.workflow_id,
                                       ticket={**TICKET, "sys_id": "abc"}, actor="tester",
                                       dry_run=True)
@@ -267,7 +270,7 @@ class EnrichmentTests(unittest.TestCase):
         """A run has to be reproducible from a recorded ticket, so what the
         caller supplied wins over what the instance says today."""
         harness = _Harness(self)
-        harness.engine._source_factory = lambda: servicenow.ContextSource(FakeClient())
+        harness.engine._source_factory = lambda client=None: servicenow.ContextSource(FakeClient())
         ticket = {**TICKET, "recent_changes": ["CHG-SUPPLIED"]}
         run_id = harness.engine.start(workflow_id=harness.workflow_id, ticket=ticket,
                                       actor="tester")
@@ -281,7 +284,7 @@ class EnrichmentTests(unittest.TestCase):
 
     def test_a_run_records_which_sources_were_unavailable(self):
         harness = _Harness(self)
-        harness.engine._source_factory = lambda: servicenow.ContextSource(None)
+        harness.engine._source_factory = lambda client=None: servicenow.ContextSource(None)
         run_id = harness.engine.start(workflow_id=harness.workflow_id,
                                       ticket={"number": "INC-BARE"}, actor="tester")
         harness.wait(run_id, "awaiting_approval")

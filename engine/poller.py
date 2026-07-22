@@ -33,6 +33,53 @@ MIN_INTERVAL_SECONDS = 30
 MAX_TICKETS_PER_SWEEP = 5
 
 
+def _connection_of(workflow_config: dict):
+    """The connection a workflow polls through, as a detached settings carrier."""
+    connection_id = (workflow_config or {}).get("connection_id")
+    if not connection_id:
+        return None
+    from models import Connection
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        if connection is None:
+            return None
+        return type("C", (), {"name": connection.name,
+                              "config": dict(connection.config or {}),
+                              "secrets": dict(connection.secrets or {})})()
+
+
+def _trigger_query(workflow_config: dict) -> str:
+    """What the poller asks ServiceNow for.
+
+    Built from the connection's monitored queue — the assignment group an
+    operations team already thinks in — plus any extra filter on the workflow.
+    Never from ticket text.
+    """
+    connection = _connection_of(workflow_config)
+    extra = (workflow_config or {}).get("filter_query", "")
+    if connection is None:
+        return extra or "active=true"
+    return servicenow.queue_query(connection, extra)
+
+
+def _poll_client(workflow_id: str):
+    """The client for this workflow's connection, falling back to the
+    environment so existing setups keep polling."""
+    from models import Workflow
+    with session_scope() as session:
+        workflow = session.get(Workflow, workflow_id)
+        config = dict(workflow.config or {}) if workflow else {}
+    connection = _connection_of(config)
+    if connection is None:
+        return servicenow.reader()
+    try:
+        return servicenow.client_from(connection)
+    except servicenow.ServiceNowError:
+        logger.exception("could not build a client for workflow %s", workflow_id)
+        return None
+
+
+
 class Poller:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
@@ -69,10 +116,9 @@ class Poller:
     async def _loop(self, workflow_id: str, name: str, config: dict) -> None:
         interval = max(MIN_INTERVAL_SECONDS,
                        int(config.get("poll_interval_seconds", DEFAULT_INTERVAL_SECONDS)))
-        query = config.get("filter_query", "")
         while True:
             try:
-                await self._sweep(workflow_id, name, query)
+                await self._sweep(workflow_id, name, _trigger_query(config))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -83,7 +129,7 @@ class Poller:
             await asyncio.sleep(interval)
 
     async def _sweep(self, workflow_id: str, name: str, query: str) -> None:
-        client = servicenow.reader()
+        client = _poll_client(workflow_id)
         if client is None:
             logger.warning("polling %s: no ServiceNow read credentials; skipping sweep", name)
             return

@@ -21,6 +21,7 @@ const NAV = [
   { group: 'Configure', items: [
     { id: 'agents', label: 'Agents', phase: 1 },
     { id: 'connections', label: 'Connections', phase: 3 },
+    { id: 'users', label: 'Users', phase: 6 },
     { id: 'audit', label: 'Audit', phase: 0 },
   ] },
 ];
@@ -30,20 +31,41 @@ const VIEW_TITLES = Object.fromEntries(
 
 // --- authentication ---------------------------------------------------------
 
+let needsBootstrap = false;
+
+async function loadAuthState() {
+  try {
+    const state = await (await fetch('/api/auth/state')).json();
+    needsBootstrap = state.needs_bootstrap;
+  } catch { needsBootstrap = false; }
+  el('bootstrap-note').classList.toggle('hidden', !needsBootstrap);
+  el('login-name').classList.toggle('hidden', !needsBootstrap);
+  el('login-name-label').classList.toggle('hidden', !needsBootstrap);
+  el('login-submit').textContent = needsBootstrap ? 'Create administrator' : 'Sign in';
+  el('login-password').setAttribute('autocomplete',
+    needsBootstrap ? 'new-password' : 'current-password');
+  el('login-hint').textContent = needsBootstrap
+    ? 'At least 10 characters. Length is what makes a password expensive to guess.'
+    : '';
+}
+
 async function doLogin(event) {
   event.preventDefault();
   const status = el('login-status');
-  status.textContent = 'Signing in…';
+  status.textContent = needsBootstrap ? 'Creating your account…' : 'Signing in…';
+  const body = needsBootstrap
+    ? { email: el('login-email').value.trim(),
+        display_name: el('login-name').value.trim() || el('login-email').value.split('@')[0],
+        password: el('login-password').value }
+    : { email: el('login-email').value.trim(), password: el('login-password').value };
   try {
-    const response = await fetch('/api/auth/login', {
+    const response = await fetch(needsBootstrap ? '/api/auth/bootstrap' : '/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        display_name: el('login-name').value.trim(),
-        role: el('login-role').value,
-      }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) throw new Error((await response.json()).detail || 'sign-in failed');
     principal = await response.json();
+    el('login-password').value = '';
     showApp();
   } catch (error) {
     status.textContent = String(error.message);
@@ -56,6 +78,33 @@ async function doLogout() {
   el('app').classList.add('hidden');
   el('login-screen').classList.remove('hidden');
   el('login-status').textContent = '';
+  await loadAuthState();
+}
+
+function openPasswordDialog() {
+  showDialog('Change your password', `
+    <p class="dialog-note">Your current password is required even though you are signed
+      in — an unattended browser is the common case, and re-asking is what stops it
+      becoming an account takeover.</p>
+    <label for="pw-current">Current password</label>
+    <input id="pw-current" class="draft-field" type="password" autocomplete="current-password" />
+    <label for="pw-new">New password</label>
+    <input id="pw-new" class="draft-field" type="password" autocomplete="new-password" />
+    <p class="field-hint">At least 10 characters.</p>
+    <p class="row-actions">
+      <button class="button" onclick="savePassword()">Change password</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
+async function savePassword() {
+  const response = await fetch('/api/auth/password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: el('pw-current').value,
+                           new_password: el('pw-new').value }),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not change', false);
+  closeDialog();
+  toast('Password changed');
 }
 
 // --- shell ------------------------------------------------------------------
@@ -74,31 +123,16 @@ const ROLES = ['viewer', 'operator', 'approver', 'admin'];
 
 function renderWho() {
   if (!principal) return;
-  // The login is a placeholder, so the role picker belongs here too — otherwise
-  // an operator hits admin-only screens with no way forward and the feature
-  // just looks missing.
   el('who').innerHTML = `
     <div class="who-name">${esc(principal.display_name)}</div>
-    <div class="who-role">${esc(principal.workspace.name)}</div>
-    <label class="who-role-label" for="role-switch">Acting as</label>
-    <select id="role-switch" class="draft-field who-role-select"
-            onchange="switchRole(this.value)">
-      ${ROLES.map(r => `<option value="${r}" ${r === principal.role ? 'selected' : ''}>${r}</option>`).join('')}
-    </select>
-    ${principal.identity_verified ? ''
-      : '<div class="who-unverified" title="The login is a placeholder; this identity was not verified">unverified identity</div>'}`;
-}
-
-async function switchRole(role) {
-  const response = await fetch('/api/auth/login', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ display_name: principal.display_name, role }),
-  });
-  if (!response.ok) { toast('Could not switch role'); return; }
-  principal = await response.json();
-  renderWho();
-  switchView(currentView);
-  toast(`Now acting as ${role}`);
+    <div class="who-role">${esc(principal.email)}</div>
+    <div class="who-role-label">${esc(principal.role)}</div>
+    ${principal.must_change_password
+      ? '<div class="who-unverified">change your password</div>' : ''}
+    <p class="row-actions">
+      <button class="button ghost" onclick="openPasswordDialog()">Password</button>
+      <button class="button ghost" onclick="doLogout()">Sign out</button>
+    </p>`;
 }
 
 function renderKillswitch() {
@@ -118,6 +152,7 @@ const VIEW_RENDERERS = {
   runs: renderRuns,
   approvals: renderApprovals,
   connections: renderConnections,
+  users: renderUsers,
 };
 
 function switchView(view) {
@@ -406,10 +441,10 @@ async function wizardAgents(workflow) {
 async function wizardDryRun(workflow) {
   const passed = workflow && workflow.dry_run_passed_at;
   el('wizard-body').innerHTML = `
-    <h3>Run it once, writing nothing</h3>
-    <p class="agent-purpose">This executes the whole workflow against a real incident. The
-      work note is composed and recorded but not sent. You cannot enable the workflow until
-      this succeeds.</p>
+    <h3>Try it once, writing nothing</h3>
+    <p class="agent-purpose">Optional but worth doing: this runs the whole workflow against a
+      real incident and composes the work note without sending it, so you see the output
+      before anything is live.</p>
     ${passed ? `<p class="field-hint"><span class="tier-badge ok">passed</span>
       Dry run succeeded ${new Date(passed * 1000).toLocaleString()}.</p>` : ''}
     <label for="wz-ticket">Incident (JSON)</label>
@@ -419,8 +454,9 @@ async function wizardDryRun(workflow) {
       <button class="button" onclick="wizardStartDryRun()">Start the dry run</button>
     </p>
     <div id="wz-run-status"></div>
-    ${wizardNav('Back', 'Next', 'wizardNext()', { nextDisabled: !passed,
-      note: passed ? '' : 'Next unlocks once a dry run has completed a work note.' })}`;
+    ${wizardNav('Back', 'Next', 'wizardNext()', {
+      note: passed ? '' : 'Optional. You can continue without it — the workflow starts in '
+        + 'dry-run mode and every run still stops at the human gate.' })}`;
 }
 
 async function wizardStartDryRun() {
@@ -479,13 +515,14 @@ function dryRunNote(run) {
 }
 
 async function wizardEnable(workflow) {
-  const canEnable = workflow && workflow.can_enable;
+  const canEnable = workflow && workflow.tested;
   el('wizard-body').innerHTML = `
     <h3>Turn it on</h3>
     <p class="agent-purpose">Enabling lets the workflow run on its own. It still proposes
       rather than acts, and it still pauses for a human before anything is handed over.</p>
-    ${canEnable ? '' : `<div class="pipeline-note"><strong>Not yet.</strong> A dry run has to
-      succeed first — go back a step and run one.</div>`}
+    ${canEnable ? '' : `<div class="pipeline-note">You have not run a test yet. Enabling is
+      allowed anyway — the workflow starts in dry-run mode and every run stops at the human
+      gate — but you will be seeing its output for the first time on a real ticket.</div>`}
     <div class="field-row">
       <label class="switch"><input type="checkbox" id="wz-poll" ${
         workflow && workflow.polling ? 'checked' : ''} /><span>Poll ServiceNow automatically</span></label>
@@ -493,8 +530,7 @@ async function wizardEnable(workflow) {
     </div>
     <p class="row-actions">
       <button class="button ghost" onclick="wizardBack()">Back</button>
-      <button class="button" onclick="wizardDoEnable()" ${canEnable ? '' : 'disabled'}>
-        Enable workflow</button>
+      <button class="button" onclick="wizardDoEnable()">Enable workflow</button>
     </p>`;
 }
 
@@ -571,7 +607,7 @@ function workflowCard(w, canRun) {
       <p class="agent-purpose">Budget $${(w.config.run_budget_usd ?? 1).toFixed(2)} per run.
         ${w.config.dry_run ? 'External writes are recorded, not sent.'
           : 'External writes are live.'}
-        ${w.can_enable ? '' : ' No dry run has succeeded yet, so it cannot be enabled.'}</p>
+        ${w.tested ? '' : ' Never test-run.'}</p>
       <div class="row-actions">
         <button class="button ghost" onclick="resumeWizard('${w.id}')">Set up</button>
         <button class="button" onclick="openRunDialog('${w.id}')" ${canRun ? '' : 'disabled'}
@@ -740,7 +776,7 @@ async function renderApprovals() {
       afterwards the decision does not carry over — you are asked again rather than having
       approved something you never saw.
       ${data.can_decide ? '' : `<br /><strong>You are signed in as ${esc(principal.role)}</strong>,
-        which can see this queue but not act on it. Switch to approver or admin in the sidebar.`}
+        which can see this queue but not act on it. An admin can change your role under Users.`}
     </div>
     ${data.approvals.length ? data.approvals.map(a => approvalCard(a, data.can_decide)).join('')
       : '<div class="empty">Nothing is waiting on a human.</div>'}`;
@@ -1051,6 +1087,8 @@ async function resetAgent(id) {
 
 // --- connections ------------------------------------------------------------
 
+let connectionCache = [];
+
 async function renderConnections() {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
   let data;
@@ -1060,50 +1098,250 @@ async function renderConnections() {
     el('view').innerHTML = '<div class="empty">Connections could not be loaded.</div>';
     return;
   }
+  connectionCache = data.connections;
+  const isAdmin = principal.role === 'admin';
   const canTest = principal.role !== 'viewer';
   el('view').innerHTML = `
     <div class="pipeline-note">
-      Credentials live in the environment where the server runs and are never stored by
-      SignalOps. This page reports whether each variable is <em>set</em> — it has no way to
-      show you a value, and no field to type one into.
+      One connection is one ServiceNow instance with one account. Add as many as you
+      need — a dev instance and a production one are simply two connections, and each
+      workflow names the one it uses. Credentials are <strong>encrypted before they are
+      stored</strong> and no screen or endpoint can read them back.
     </div>
+    <div class="row-actions">
+      <button class="button" onclick="openConnectionDialog()" ${isAdmin ? '' : 'disabled'}
+        title="${isAdmin ? 'Add a ServiceNow instance' : 'Adding a connection requires admin'}">
+        Add ServiceNow connection</button>
+    </div>
+    ${data.connections.length
+      ? data.connections.map(c => connectionCard(c, isAdmin, canTest)).join('')
+      : '<div class="empty">No connections yet. Add one to point a workflow at ServiceNow.</div>'}
+    ${data.environment_usable ? `<div class="pipeline-note">Environment variables are also
+      configured (<code>${esc(data.environment_auth_method)}</code> auth). A workflow with no
+      connection selected falls back to them, so an older setup keeps working.</div>` : ''}`;
+}
+
+function connectionCard(c, isAdmin, canTest) {
+  const tested = c.last_tested_at
+    ? `${c.last_test_ok ? 'ok' : 'failing'} · ${new Date(c.last_tested_at * 1000).toLocaleString()}`
+    : 'never tested';
+  return `
     <div class="agent-item">
       <div class="agent-top">
-        <strong>ServiceNow</strong>
-        <span class="tier-badge ${data.missing_for_reads.length ? 'bad' : 'ok'}">
-          ${data.missing_for_reads.length ? 'reads unavailable' : 'reads ready'}</span>
-        <span class="tier-badge ${data.missing_for_writes.length ? '' : 'ok'}">
-          ${data.missing_for_writes.length ? 'writes unavailable' : 'writes ready'}</span>
-        <span class="tier-badge">${esc(data.auth_method)} auth</span>
+        <strong>${esc(c.name)}</strong>
+        <span class="tier-badge">${esc(c.auth_type)} auth</span>
+        <span class="tier-badge ${c.last_test_ok === true ? 'ok' : c.last_test_ok === false ? 'bad' : ''}">
+          ${esc(tested)}</span>
+        ${c.assignment_group ? `<span class="tier-badge warn">queue: ${esc(c.assignment_group)}</span>` : ''}
       </div>
-      ${Object.entries(data.environment).map(([name, present]) => `
-        <div class="audit-row">
-          <span class="audit-actor"><code>${esc(name)}</code></span>
-          <span class="tier-badge ${present ? 'ok' : 'bad'}">${present ? 'set' : 'missing'}</span>
-        </div>`).join('')}
-      <p class="field-hint">Reads use a separate account from writes on purpose: the write
-        account needs only enough permission to append a work note and set a state, so what
-        the workflow can do is bounded by the credential and not only by the prompt.</p>
-      ${data.auth_method === 'basic' ? `<p class="field-hint">Using <strong>HTTP Basic</strong>.
-        If a test fails with 401 while the same account signs in fine at the instance login
-        page, check the user's <strong>identity type</strong> — ServiceNow refuses basic
-        authentication for the REST API from accounts typed as Human, and an integration
-        account must be set to <strong>Machine</strong>. Alternatively set
-        <code>SN_CLIENT_ID</code> and <code>SN_CLIENT_SECRET</code> to use OAuth instead;
-        both schemes are supported.</p>`
-        : '<p class="field-hint">Using <strong>OAuth</strong>. Tokens are held in memory only, '
-          + 'never stored and never returned by any endpoint. Basic authentication remains '
-          + 'available — unset the client variables to fall back to it.</p>'}
-      ${data.missing_for_writes.length && !data.missing_for_reads.length ? `
-        <p class="field-hint">Without write credentials the workflow still runs end to end and
-        records the work note it would have posted.</p>` : ''}
+      <p class="agent-purpose"><code>${esc(c.base_url)}</code> as <code>${esc(c.username)}</code></p>
+      ${c.assignment_group
+        ? `<p class="field-hint">Polls incidents assigned to <strong>${esc(c.assignment_group)}</strong>.</p>`
+        : '<p class="field-hint">No queue set — this connection will not trigger runs on its own.</p>'}
+      ${c.last_test_detail ? `<p class="field-hint">${esc(c.last_test_detail)}</p>` : ''}
       <div class="row-actions">
-        <button class="button ghost" onclick="testConnection()" ${canTest ? '' : 'disabled'}
-          title="${canTest ? 'Test the read credentials' : 'Testing requires the operator role'}">
+        <button class="button ghost" onclick="testConnection('${c.id}')" ${canTest ? '' : 'disabled'}>
           Test connection</button>
+        <button class="button ghost" onclick="openConnectionDialog('${c.id}')" ${isAdmin ? '' : 'disabled'}>
+          Edit</button>
+        <button class="button ghost" onclick="deleteConnection('${c.id}')" ${isAdmin ? '' : 'disabled'}>
+          Delete</button>
       </div>
-      <p id="conn-result" class="field-hint"></p>
+      <p class="field-hint" id="conn-result-${c.id}"></p>
     </div>`;
+}
+
+function openConnectionDialog(id) {
+  const c = connectionCache.find(x => x.id === id) || {};
+  const editing = Boolean(id);
+  showDialog(editing ? `Edit ${c.name}` : 'Add ServiceNow connection', `
+    <label for="cn-name">Connection name</label>
+    <input id="cn-name" class="draft-field" value="${esc(c.name || '')}"
+      placeholder="e.g. Production, or Dev 385636" />
+    <p class="field-hint">Whatever you will recognise when picking it on a workflow.</p>
+
+    <label for="cn-url">Instance URL</label>
+    <input id="cn-url" class="draft-field" value="${esc(c.base_url || '')}"
+      placeholder="https://dev385636.service-now.com" />
+
+    <label for="cn-auth">Authentication</label>
+    <select id="cn-auth" class="draft-field" onchange="toggleOauthFields()">
+      <option value="basic" ${c.auth_type !== 'oauth' ? 'selected' : ''}>Basic — username and password</option>
+      <option value="oauth" ${c.auth_type === 'oauth' ? 'selected' : ''}>OAuth — client credentials</option>
+    </select>
+
+    <label for="cn-user">Username</label>
+    <input id="cn-user" class="draft-field" value="${esc(c.username || '')}" autocomplete="off" />
+
+    <label for="cn-pass">Password</label>
+    <input id="cn-pass" class="draft-field" type="password" autocomplete="new-password"
+      placeholder="${c.secrets_set && c.secrets_set.password ? 'unchanged — leave blank to keep it' : ''}" />
+    <p class="field-hint">Set the ServiceNow user's <strong>identity type to Machine</strong>.
+      Human accounts are refused for REST basic auth, and the error is identical to a wrong
+      password.</p>
+
+    <div id="cn-oauth" class="${c.auth_type === 'oauth' ? '' : 'hidden'}">
+      <label for="cn-cid">Client ID</label>
+      <input id="cn-cid" class="draft-field" value="${esc(c.client_id || '')}" autocomplete="off" />
+      <label for="cn-csec">Client secret</label>
+      <input id="cn-csec" class="draft-field" type="password" autocomplete="new-password"
+        placeholder="${c.secrets_set && c.secrets_set.client_secret ? 'unchanged' : ''}" />
+      <p class="field-hint">From System OAuth → Application Registry → “Create an OAuth API
+        endpoint for external clients”.</p>
+    </div>
+
+    <label for="cn-queue">Monitored queue (assignment group)</label>
+    <input id="cn-queue" class="draft-field" value="${esc(c.assignment_group || '')}"
+      placeholder="e.g. IPM_MQ_S_ADMIN" />
+    <p class="field-hint">New active incidents assigned to this group trigger the workflow.
+      Leave empty to start runs by hand instead.</p>
+
+    <label for="cn-extra">Extra filter (optional)</label>
+    <input id="cn-extra" class="draft-field" value="${esc(c.extra_query || '')}"
+      placeholder="priority&lt;=2" />
+    <p class="field-hint">A ServiceNow encoded query, combined with the queue above.</p>
+
+    <p class="row-actions">
+      <button class="button" onclick="saveConnection(${editing ? `'${id}'` : 'null'})">
+        ${editing ? 'Save changes' : 'Create connection'}</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
+function toggleOauthFields() {
+  el('cn-oauth').classList.toggle('hidden', el('cn-auth').value !== 'oauth');
+}
+
+async function saveConnection(id) {
+  const body = {
+    kind: 'servicenow',
+    name: el('cn-name').value.trim(),
+    base_url: el('cn-url').value.trim(),
+    auth_type: el('cn-auth').value,
+    username: el('cn-user').value.trim(),
+    password: el('cn-pass').value || null,
+    client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
+    client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
+    assignment_group: el('cn-queue').value.trim(),
+    extra_query: el('cn-extra').value.trim(),
+  };
+  if (!body.name || !body.base_url) return toast('Name and instance URL are required', false);
+  const response = await fetch(id ? `/api/connections/${id}` : '/api/connections', {
+    method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not save', false);
+  closeDialog();
+  toast(id ? 'Connection updated' : 'Connection created');
+  renderConnections();
+}
+
+async function deleteConnection(id) {
+  const c = connectionCache.find(x => x.id === id);
+  if (!window.confirm(`Delete the connection "${c ? c.name : id}"?`)) return;
+  const response = await fetch(`/api/connections/${id}`, { method: 'DELETE' });
+  if (!response.ok) return toast((await response.json()).detail || 'could not delete', false);
+  toast('Connection deleted');
+  renderConnections();
+}
+
+async function testConnection(id) {
+  const target = el(`conn-result-${id}`);
+  if (target) target.textContent = 'Testing…';
+  const response = await fetch(`/api/connections/${id}/test`, { method: 'POST' });
+  const result = await response.json();
+  if (target) {
+    target.innerHTML = result.ok
+      ? `<span class="tier-badge ok">connected</span> ${esc(result.detail)}`
+      : `<span class="tier-badge bad">failed</span> ${esc(result.detail)}`;
+  }
+  renderConnections();
+}
+
+// --- users -------------------------------------------------------------------
+
+async function renderUsers() {
+  el('view').innerHTML = '<div class="empty">Loading…</div>';
+  if (principal.role !== 'admin') {
+    el('view').innerHTML = `<div class="pipeline-note">Managing users requires the admin
+      role. You are signed in as <strong>${esc(principal.role)}</strong>.</div>`;
+    return;
+  }
+  const data = await (await fetch('/api/users')).json();
+  el('view').innerHTML = `
+    <div class="pipeline-note">
+      Roles are enforced by the server on every request, not by hiding buttons.
+      <strong>Viewer</strong> reads. <strong>Operator</strong> starts runs.
+      <strong>Approver</strong> decides on human gates. <strong>Admin</strong> manages
+      agents, connections, users and the kill switch.
+    </div>
+    <div class="row-actions">
+      <button class="button" onclick="openUserDialog()">Invite user</button>
+    </div>
+    ${data.users.map(u => `
+      <div class="agent-item">
+        <div class="agent-top">
+          <strong>${esc(u.display_name)}</strong>
+          <span class="tier-badge ${u.role === 'admin' ? 'warn' : ''}">${esc(u.role)}</span>
+          ${u.active ? '' : '<span class="tier-badge bad">deactivated</span>'}
+          ${u.locked ? '<span class="tier-badge bad">locked</span>' : ''}
+          ${u.must_change_password ? '<span class="tier-badge">must change password</span>' : ''}
+        </div>
+        <p class="agent-purpose"><code>${esc(u.email)}</code>${u.last_login_at
+          ? ` · last signed in ${new Date(u.last_login_at * 1000).toLocaleString()}`
+          : ' · never signed in'}</p>
+        <div class="row-actions">
+          <button class="button ghost" onclick="openUserDialog('${u.id}')">Edit</button>
+        </div>
+      </div>`).join('')}`;
+  window.__users = data.users;
+}
+
+function openUserDialog(id) {
+  const u = (window.__users || []).find(x => x.id === id) || {};
+  const editing = Boolean(id);
+  showDialog(editing ? `Edit ${u.display_name}` : 'Invite a user', `
+    <label for="us-email">Email</label>
+    <input id="us-email" class="draft-field" type="email" value="${esc(u.email || '')}"
+      ${editing ? 'disabled' : ''} />
+    <label for="us-name">Name</label>
+    <input id="us-name" class="draft-field" value="${esc(u.display_name || '')}" />
+    <label for="us-role">Role</label>
+    <select id="us-role" class="draft-field">
+      ${['viewer', 'operator', 'approver', 'admin'].map(r =>
+        `<option value="${r}" ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+    </select>
+    <label for="us-pass">${editing ? 'Set a new password (optional)' : 'Initial password'}</label>
+    <input id="us-pass" class="draft-field" type="password" autocomplete="new-password" />
+    <p class="field-hint">At least 10 characters. You will know this password, so the user is
+      asked to change it at first sign-in.</p>
+    ${editing ? `<div class="field-row"><label class="switch">
+      <input type="checkbox" id="us-active" ${u.active ? 'checked' : ''} />
+      <span>Active</span></label>
+      <span class="field-hint">Deactivating revokes access on the next request, not the next
+        login. Users are never deleted — that would orphan the audit entries naming them.</span>
+      </div>` : ''}
+    <p class="row-actions">
+      <button class="button" onclick="saveUser(${editing ? `'${id}'` : 'null'})">
+        ${editing ? 'Save' : 'Create user'}</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
+async function saveUser(id) {
+  const body = id
+    ? { display_name: el('us-name').value.trim(), role: el('us-role').value,
+        active: el('us-active') ? el('us-active').checked : undefined,
+        password: el('us-pass').value || undefined }
+    : { email: el('us-email').value.trim(), display_name: el('us-name').value.trim(),
+        role: el('us-role').value, password: el('us-pass').value };
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  const response = await fetch(id ? `/api/users/${id}` : '/api/users', {
+    method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not save', false);
+  closeDialog();
+  toast(id ? 'User updated' : 'User created');
+  renderUsers();
 }
 
 // --- feedback ---------------------------------------------------------------
@@ -1224,5 +1462,6 @@ function connect() {
     const response = await fetch('/api/auth/me');
     if (response.ok) { principal = await response.json(); return showApp(); }
   } catch { /* fall through to the login gate */ }
+  await loadAuthState();
   el('login-screen').classList.remove('hidden');
 })();

@@ -358,6 +358,58 @@ def _oauth_credentials() -> tuple[str | None, str | None]:
             os.getenv(OAUTH_ENV_VARS["client_secret"]))
 
 
+# --- connections -------------------------------------------------------------
+
+# What a stored ServiceNow connection holds. Split deliberately: `config` is
+# everything safe to return to a browser, `secrets` is everything that is not.
+CONFIG_FIELDS = ("base_url", "auth_type", "username", "client_id",
+                 "assignment_group", "extra_query")
+SECRET_FIELDS = ("password", "client_secret")
+
+
+def client_from(connection) -> ServiceNowClient:
+    """Build a client from a stored connection.
+
+    One connection is one instance with one account, which is why several can
+    coexist — a dev instance and a production one are simply two rows. What the
+    workflow can do is bounded by that account's permissions in ServiceNow, so
+    the least-privileged account that can read incidents and append work notes
+    is the right one to configure.
+    """
+    from crypto import decrypt
+
+    config = connection.config or {}
+    secrets = connection.secrets or {}
+    base_url = config.get("base_url", "")
+    if not base_url:
+        raise ServiceNowError(f"connection {connection.name!r} has no instance URL")
+    username = config.get("username") or ""
+    password = decrypt(secrets.get("password")) or ""
+    if config.get("auth_type") == "oauth":
+        return ServiceNowClient(base_url, username, password,
+                                config.get("client_id"),
+                                decrypt(secrets.get("client_secret")))
+    return ServiceNowClient(base_url, username, password)
+
+
+def queue_query(connection, extra: str = "") -> str:
+    """The encoded query that selects this connection's monitored queue.
+
+    Built from configuration, never from ticket text. `assignment_group` is the
+    queue an operations team actually thinks in — "everything raised against
+    IPM_MQ_S_ADMIN" — so it is the field the workflow triggers on.
+    """
+    config = connection.config or {}
+    clauses = ["active=true"]
+    group = (config.get("assignment_group") or "").strip()
+    if group:
+        clauses.append(f"assignment_group.name={group}")
+    for candidate in (config.get("extra_query"), extra):
+        if candidate and candidate.strip():
+            clauses.append(candidate.strip())
+    return "^".join(clauses) + "^ORDERBYDESCsys_created_on"
+
+
 def reader() -> ServiceNowClient | None:
     url = os.getenv(ENV_VARS["instance"], "")
     user = os.getenv(ENV_VARS["read_user"])

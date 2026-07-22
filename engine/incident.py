@@ -193,6 +193,19 @@ def build(ctx: RunContext):
         ctx.check("hand_off")
         proposal = state["outputs"]["remediation_planner"]
         ticket = state.get("ticket", {})
+        if not ctx.config.get("require_outcome_report", True):
+            # Configured off: the run ends here and the ticket stays open for a
+            # person to close in ServiceNow. Nothing is resolved on the strength
+            # of an approval alone either way — the difference is only whether
+            # the platform waits to be told.
+            with ctx.step("hand_off") as record:
+                record["output"] = {"steps": len(proposal.get("steps", [])),
+                                    "awaiting": "an operator; no report was requested"}
+            return {"outcome": "proposed",
+                    "outcome_reason": "plan approved and handed to an operator; this "
+                                      "workflow does not wait for an outcome report",
+                    "decisions": [{"node": "hand_off", "decision": "proposed",
+                                   "why": "outcome reporting is off for this workflow"}]}
         payload = {"plan": proposal, "incident": ticket.get("number")}
         report = interrupt({
             "kind": "execution_outcome",

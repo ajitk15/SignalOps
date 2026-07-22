@@ -24,26 +24,25 @@
         <h1>Signal<span class="ops">Ops</span></h1>
       </div>
 
-      <div class="login-warning">
-        <strong>Identity is not verified.</strong> This build uses a placeholder login — any name and
-        role is accepted, and no password is checked. Audit entries record a <em>claimed</em>
-        identity. The server refuses to start outside a local environment for this reason.
+      <div class="login-warning hidden" id="bootstrap-note">
+        <strong>First run.</strong> No accounts exist yet, so this creates the first
+        administrator. Everyone else is invited from Settings once you are in.
       </div>
 
-      <label for="login-name">Your name</label>
-      <input id="login-name" class="draft-field" placeholder="e.g. Ajit" required autocomplete="off" />
+      <label for="login-email">Email</label>
+      <input id="login-email" class="draft-field" type="email" required autocomplete="username"
+        placeholder="you@company.com" />
 
-      <label for="login-role">Role</label>
-      <select id="login-role" class="draft-field">
-        <option value="viewer">Viewer — read only</option>
-        <option value="operator" selected>Operator — run workflows</option>
-        <option value="approver">Approver — decide on human gates</option>
-        <option value="admin">Admin — settings and kill switch</option>
-      </select>
-      <p class="dialog-note">Roles are enforced by the server, so this choice genuinely changes what
-        you can do.</p>
+      <label for="login-name" class="hidden" id="login-name-label">Your name</label>
+      <input id="login-name" class="draft-field hidden" placeholder="e.g. Ajit"
+        autocomplete="name" />
 
-      <p><button class="button" type="submit">Continue</button></p>
+      <label for="login-password">Password</label>
+      <input id="login-password" class="draft-field" type="password" required
+        autocomplete="current-password" placeholder="Your password" />
+      <p class="dialog-note" id="login-hint"></p>
+
+      <p><button class="button" type="submit" id="login-submit">Sign in</button></p>
       <p id="login-status" class="dialog-note"></p>
     </form>
   </div>

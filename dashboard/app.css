@@ -1561,3 +1561,8 @@ button.status-pill:hover {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 .template-card + .template-card { margin-top: 10px; }
+
+/* An email address is a literal, not a label: title-casing it renders
+   Ajit@Example.Com, which looks like a different address. */
+.who-role { text-transform: none; }
+.who-role-label { text-transform: uppercase; }

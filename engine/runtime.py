@@ -87,7 +87,8 @@ class Engine:
         self._client = client
         # Injectable so tests can exercise the write path without a ServiceNow
         # instance, and so phase 4 can register a different sink.
-        self._sink_factory = sink_factory or (lambda *, dry_run: TicketSink(dry_run=dry_run))
+        self._sink_factory = sink_factory or (
+            lambda *, dry_run, client=None: TicketSink(dry_run=dry_run, client=client))
         self._source_factory = source_factory or ContextSource
         self._pr_sink_factory = pr_sink_factory or (
             lambda *, dry_run: PullRequestSink(dry_run=dry_run))
@@ -204,8 +205,9 @@ class Engine:
                           client=self.client, agents=agents, specs=specs,
                           session_scope=session_scope, publish=self._publish,
                           run_budget_usd=budget, config=config,
-                          sink=self._sink_factory(dry_run=dry_run),
-                          source=self._source_factory(),
+                          sink=self._sink_factory(dry_run=dry_run,
+                                                  client=_connection_client(config)),
+                          source=self._source_factory(_connection_client(config)),
                           pr_sink=self._pr_sink_factory(dry_run=dry_run),
                           workspace_factory=self._workspace_factory(run_id, config))
 
@@ -488,6 +490,35 @@ def _mark_dry_run_passed(session, run) -> bool:
         return False
     workflow.dry_run_passed_at = time.time()
     return True
+
+
+def _connection_client(config: dict):
+    """The ServiceNow client this workflow should use, or None for the default.
+
+    A workflow names a connection; the connection carries the instance and its
+    credentials. Falling back to the environment keeps installations that were
+    configured that way working unchanged.
+    """
+    connection_id = (config or {}).get("connection_id")
+    if not connection_id:
+        return None
+    from integrations import servicenow
+    from models import Connection
+    with session_scope() as session:
+        connection = session.get(Connection, connection_id)
+        if connection is None:
+            logger.warning("workflow references connection %s, which no longer exists",
+                           connection_id)
+            return None
+        settings = type("C", (), {"name": connection.name,
+                                  "config": dict(connection.config or {}),
+                                  "secrets": dict(connection.secrets or {})})()
+    try:
+        return servicenow.client_from(settings)
+    except servicenow.ServiceNowError:
+        logger.exception("could not build a client for connection %s", connection_id)
+        return None
+
 
 
 def _configs(session, workspace_id: str) -> dict:
