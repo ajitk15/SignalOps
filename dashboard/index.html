@@ -13,158 +13,30 @@
 <body>
   <header>
     <div class="brand">
-      <!-- Signal rising into a spark: raw signals become an insight. Inline so
-           there is no asset to fetch, and themed from the CSS variables. -->
       <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
         <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
         <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
           stroke-linecap="round" stroke-linejoin="round" />
         <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
       </svg>
-      <h1 id="app-title">SignalOps</h1>
+      <h1 id="app-title">Signal<span class="ops">Ops</span></h1>
     </div>
     <div class="header-actions">
-      <div class="tabs"><button class="tab active" data-view="dashboard"
-          onclick="switchView('dashboard')">Incidents</button><button class="tab" data-view="agents"
-          onclick="switchView('agents')">Agents</button><button class="tab" data-view="rules"
-          onclick="switchView('rules')">Rules</button><button class="tab" data-view="integrations"
-          onclick="switchView('integrations')">Integrations</button><button class="tab" data-view="kb"
-          onclick="switchView('kb')">Knowledge base</button><button class="tab" data-view="audit"
-          onclick="switchView('audit')">Audit</button></div>
-      <div id="health" class="health"><span id="conn" class="conn down">connecting…</span></div>
+      <span class="status-pill" id="build-state">checking…</span>
     </div>
   </header>
-  <main id="dashboard-view">
-    <div class="pipeline-note" id="pipeline-note"><button class="dismiss" title="Dismiss"
-        onclick="dismissNote()">✕</button><strong>Processing:</strong> Collection + rules always run with no AI. AI is
-      used only for a new, eligible incident that has no strong approved knowledge-base match.</div>
-    <section>
-      <h2>Watched Objects</h2>
-      <div id="tiles" class="tiles"><span class="empty">Waiting for first poll…</span></div>
-    </section>
 
+  <main>
     <section>
-      <h2>Pipeline <span class="empty" style="font-weight:400">(click for cost detail)</span></h2>
-      <div id="strip" class="strip" onclick="this.classList.toggle('expanded')"></div>
-    </section>
-
-    <section class="cols">
-      <div>
-        <h2>Incidents</h2>
-        <div class="list-tools">
-          <div id="summary" class="summary"></div>
-          <div id="filters" class="filters"></div>
-        </div>
-        <div id="incidents" class="incidents">
-          <div class="empty" style="padding:14px">None yet.</div>
-        </div>
+      <h2>Rebuilding</h2>
+      <div class="pipeline-note">
+        <strong>SignalOps v2 is under construction on this branch.</strong>
+        The monitoring pipeline has been removed. The workflow platform — login, onboarding,
+        the agent catalogue and the two workflows — is being built in its place.
       </div>
-      <div>
-        <h2>Detail</h2>
-        <div id="detail" class="detail-panel"><span class="empty">Select an incident to view Collection → Diagnosis →
-            Report.</span></div>
-      </div>
+      <div id="phases" class="kb-library"></div>
     </section>
   </main>
-  <div id="toast" role="status"></div>
-  <main id="agents-view" class="hidden">
-    <section>
-      <h2>Agent workflow</h2>
-      <p class="empty">Every stage of the pipeline, whether or not it has run yet. Collection and rules are
-        deterministic and free; the AI agents run only when the gate conditions all hold.</p>
-      <div id="workflow" class="workflow"><span class="empty">Waiting for the pipeline snapshot…</span></div>
-    </section>
-  </main>
-  <main id="rules-view" class="hidden">
-    <section>
-      <h2>Detection rules</h2>
-      <p class="empty">Built-in rules are file-managed and read-only here. Custom rules evaluate after
-        built-ins (first match wins), so they add detections without changing existing behaviour.</p>
-      <p><button class="button" onclick="openRuleDialog()">Add rule</button></p>
-      <div id="platform-tabs" class="platform-tabs"></div>
-      <div id="rules-list" class="kb-library"><span class="empty">Loading rules…</span></div>
-    </section>
-  </main>
-  <main id="integrations-view" class="hidden">
-    <section>
-      <h2>Integrations</h2>
-      <p class="empty">Credentials are configured via environment variables (.env) only — they are never
-        entered in the browser, stored in the database, or returned by the API.</p>
-      <div id="integrations-list" class="kb-library"><span class="empty">Loading integrations…</span></div>
-    </section>
-  </main>
-  <main id="audit-view" class="hidden">
-    <section>
-      <h2>Audit trail</h2>
-      <p class="empty">Every incident status change, knowledge-base edit and rule change.
-        <strong>Actor is self-asserted</strong> — this API has no authentication, so entries record a
-        claimed name, not a verified identity.</p>
-      <div id="audit-list" class="audit-list"><span class="empty">Loading audit trail…</span></div>
-    </section>
-  </main>
-  <main id="kb-view" class="hidden">
-    <section>
-      <h2>Approved knowledge-base articles</h2>
-      <p class="empty">Only reviewed articles are listed here. Changes take effect for future incident matching.</p>
-      <div id="kb-library" class="kb-library"><span class="empty">Loading approved articles…</span></div>
-    </section>
-  </main>
-  <dialog id="kb-dialog"><button class="dialog-close" onclick="el('kb-dialog').close()">Close</button>
-    <h3 id="kb-title"></h3>
-    <div id="kb-content" class="kb-rendered"></div>
-  </dialog>
-  <dialog id="kb-draft-dialog"><button class="dialog-close" onclick="el('kb-draft-dialog').close()">Close</button>
-    <h3>Review KB draft</h3>
-    <p class="dialog-note">Edit the resolution to the human-confirmed action before approval. Approval publishes the
-      article to the approved KB.</p><label>Approved by</label><input id="kb-approved-by" class="draft-field"
-      placeholder="Your name or team" /><textarea id="kb-draft-content" class="draft-editor"></textarea>
-    <p><button id="kb-approve-button" class="button">Approve & publish article</button></p>
-    <p id="kb-draft-status" class="dialog-note"></p>
-  </dialog>
-  <dialog id="rule-dialog"><button class="dialog-close" onclick="el('rule-dialog').close()">Close</button>
-    <h3 id="rule-dialog-title">Add detection rule</h3>
-    <p class="dialog-note">Start from a product template or build from scratch. The rule takes effect
-      immediately for future observations.</p>
-    <div id="rule-template-row">
-      <label>Template</label>
-      <select id="rule-template" class="draft-field" onchange="applyRuleTemplate()"></select>
-    </div>
-    <label>Rule id</label><input id="rule-id" class="draft-field" placeholder="lowercase-with-dashes" />
-    <label>Metric</label><input id="rule-metric" class="draft-field" placeholder="e.g. proxy_latency_ms" />
-    <label>Condition</label>
-    <select id="rule-condition" class="draft-field">
-      <option value="greater_than">greater_than — numeric value over a threshold</option>
-      <option value="not_in">not_in — status outside the healthy set</option>
-      <option value="rising">rising — value strictly rising across polls</option>
-    </select>
-    <label>Threshold / healthy values (comma-separated for not_in)</label>
-    <input id="rule-value" class="draft-field" placeholder="e.g. 1000   or   RUNNING, STARTED" />
-    <label>Severity</label>
-    <select id="rule-severity" class="draft-field" onchange="toggleProvisional()">
-      <option value="">Default (P3) — AI may refine it when it runs</option>
-      <option value="ai">Decided by AI — the Diagnostician sets it</option>
-      <option value="P1">P1 — fixed</option>
-      <option value="P2" selected>P2 — fixed</option>
-      <option value="P3">P3 — fixed</option>
-      <option value="P4">P4 — fixed</option>
-    </select>
-    <div id="provisional-row" class="hidden">
-      <label>Provisional severity (used to decide whether AI runs at all)</label>
-      <select id="rule-provisional" class="draft-field">
-        <option>P1</option><option>P2</option><option selected>P3</option><option>P4</option>
-      </select>
-    </div>
-    <label>Message</label><input id="rule-message" class="draft-field"
-      placeholder="e.g. Proxy latency {value} ms exceeds {threshold} ms" />
-    <p><button id="rule-save" class="button" onclick="saveRule()">Create rule</button></p>
-    <p id="rule-status" class="dialog-note"></p>
-  </dialog>
-  <dialog id="kb-editor-dialog"><button class="dialog-close" onclick="el('kb-editor-dialog').close()">Close</button>
-    <h3 id="kb-editor-title">Edit KB article</h3><label>Edited by</label><input id="kb-edited-by" class="draft-field"
-      placeholder="Your name or team" /><textarea id="kb-editor-content" class="draft-editor"></textarea>
-    <p><button id="kb-save-button" class="button">Save reviewed changes</button></p>
-    <p id="kb-editor-status" class="dialog-note"></p>
-  </dialog>
 
   <script src="/static/app.js" defer></script>
 </body>
