@@ -70,13 +70,35 @@ function renderNav() {
     </div>`).join('');
 }
 
+const ROLES = ['viewer', 'operator', 'approver', 'admin'];
+
 function renderWho() {
   if (!principal) return;
+  // The login is a placeholder, so the role picker belongs here too — otherwise
+  // an operator hits admin-only screens with no way forward and the feature
+  // just looks missing.
   el('who').innerHTML = `
     <div class="who-name">${esc(principal.display_name)}</div>
-    <div class="who-role">${esc(principal.role)} · ${esc(principal.workspace.name)}</div>
+    <div class="who-role">${esc(principal.workspace.name)}</div>
+    <label class="who-role-label" for="role-switch">Acting as</label>
+    <select id="role-switch" class="draft-field who-role-select"
+            onchange="switchRole(this.value)">
+      ${ROLES.map(r => `<option value="${r}" ${r === principal.role ? 'selected' : ''}>${r}</option>`).join('')}
+    </select>
     ${principal.identity_verified ? ''
       : '<div class="who-unverified" title="The login is a placeholder; this identity was not verified">unverified identity</div>'}`;
+}
+
+async function switchRole(role) {
+  const response = await fetch('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: principal.display_name, role }),
+  });
+  if (!response.ok) { toast('Could not switch role'); return; }
+  principal = await response.json();
+  renderWho();
+  switchView(currentView);
+  toast(`Now acting as ${role}`);
 }
 
 function renderKillswitch() {
@@ -115,15 +137,27 @@ async function renderAgents() {
   el('view').innerHTML = `
     <div class="pipeline-note">
       Every agent that can run is listed here — the catalogue is the source of truth, not a
-      summary of it. <strong>Tools and access tier are defined in code and cannot be changed
-      from this screen</strong>; customisation covers the model, guidance and thresholds,
-      which shape how an agent judges rather than what it can reach.
+      summary of it. You can change the model, rewrite the prompt, set thresholds and
+      enable or disable each one. <strong>Tools and access tier are defined in code</strong>
+      and stay fixed: customisation changes how an agent judges, never what it can reach.
     </div>
+    ${canEdit ? '' : `<div class="pipeline-note" style="border-color:var(--warn)">
+      <strong>You are acting as ${esc(principal.role)}, so editing is read-only.</strong>
+      Agent configuration is an admin action. Switch your role to <em>admin</em> in the
+      sidebar to edit — the login is a placeholder, so you can change it freely.
+    </div>`}
+    <p><button class="button ghost" onclick="exportAllAgents()">Download all agents (.zip)</button></p>
     <div class="agent-grid">
       ${agentCache.map(agentCard).join('')}
-    </div>
-    ${canEdit ? '' : `<p class="empty">You are signed in as ${esc(principal.role)};
-      customising agents requires admin.</p>`}`;
+    </div>`;
+}
+
+function exportAllAgents() {
+  window.location = '/api/agents/export/bundle';
+}
+
+function exportAgent(id) {
+  window.location = `/api/agents/${id}/export`;
 }
 
 function agentCard(agent) {
@@ -151,14 +185,17 @@ function agentCard(agent) {
       </div>
       ${agent.enabled ? '' : `<div class="locked-note" style="border-color:var(--warn)">
         <strong>Disabled.</strong> ${esc(agent.disabled_effect)}</div>`}
-      ${canEdit ? `<div class="row-actions" style="margin-top:12px">
-        <button class="button" onclick="openAgentDialog('${esc(agent.id)}')">Edit</button>
-        <button class="button ghost" onclick="toggleAgent('${esc(agent.id)}')">
+      <div class="row-actions" style="margin-top:12px">
+        <button class="button" onclick="openAgentDialog('${esc(agent.id)}')"
+          ${canEdit ? '' : 'disabled title="Requires admin — switch role in the sidebar"'}>Edit</button>
+        <button class="button ghost" onclick="toggleAgent('${esc(agent.id)}')"
+          ${canEdit ? '' : 'disabled title="Requires admin — switch role in the sidebar"'}>
           ${agent.enabled ? 'Disable' : 'Enable'}</button>
         <button class="button ghost" onclick="showPrompt('${esc(agent.id)}')">View prompt</button>
-        ${agent.customised
+        <button class="button ghost" onclick="exportAgent('${esc(agent.id)}')">Download</button>
+        ${agent.customised && canEdit
           ? `<button class="button ghost" onclick="resetAgent('${esc(agent.id)}')">Reset</button>` : ''}
-      </div>` : ''}
+      </div>
     </div>`;
 }
 
@@ -191,8 +228,11 @@ async function showPrompt(id) {
     </div>`);
 }
 
+let currentAgentId = null;
+
 function openAgentDialog(id) {
   const agent = agentCache.find(a => a.id === id);
+  currentAgentId = id;
   const body = `
     <p class="dialog-note">${esc(agent.purpose)}</p>
 
@@ -235,16 +275,28 @@ function openAgentDialog(id) {
         : 'This agent’s output drives an action, so approval is on by default.'}
     </p>
 
-    <label for="ag-guidance">Additional guidance</label>
-    <textarea id="ag-guidance" class="draft-editor" style="min-height:110px"
-      placeholder="Shape how this agent judges — domain conventions, what to prefer when the evidence is ambiguous.">${esc(agent.extra_guidance || '')}</textarea>
-    <p class="field-hint">Appended below the safety rules as lower-authority text.</p>
+    <label for="ag-prompt">Instructions (the agent's task prompt)</label>
+    <textarea id="ag-prompt" class="draft-editor" style="min-height:150px"
+      placeholder="What this agent should do.">${esc(agent.custom_prompt || agent.default_prompt)}</textarea>
+    <p class="field-hint">
+      Replaces the shipped instructions entirely — rewrite freely.
+      ${agent.custom_prompt
+        ? '<a href="#" onclick="restoreDefaultPrompt(event)">Restore the shipped instructions</a>'
+        : 'Currently the shipped default.'}
+    </p>
+
+    <label for="ag-guidance">Additional guidance <span class="field-hint" style="display:inline">(optional)</span></label>
+    <textarea id="ag-guidance" class="draft-editor" style="min-height:80px"
+      placeholder="Extra notes appended below the instructions — domain conventions, what to prefer when evidence is ambiguous.">${esc(agent.extra_guidance || '')}</textarea>
+    <p class="field-hint">Appended in a lower-authority block, below the safety rules.</p>
 
     <p class="locked-note">
       <strong>Not editable by design:</strong> tools
-      (<code>${agent.tools.join('</code> <code>') || 'none'}</code>) and access tier
-      (<code>${esc(agent.tier)}</code>) are defined in code. Guidance that tries to override the
-      safety rules is rejected — otherwise customising an agent would be a way around them.
+      (<code>${agent.tools.join('</code> <code>') || 'none'}</code>), access tier
+      (<code>${esc(agent.tier)}</code>) and the safety preamble that sits above your
+      instructions. Text that tries to countermand those rules is rejected — otherwise
+      editing an agent would be a way around them.
+      <a href="#" onclick="showPrompt('${esc(id)}');closeDialog();return false">See the composed prompt</a>.
     </p>
 
     <p>
@@ -277,6 +329,9 @@ async function saveAgent(id) {
         enabled,
         model: el('ag-model').value,
         requires_approval: el('ag-approval').checked,
+        // Only store a prompt when it actually differs from the shipped one,
+        // so "customised" means something.
+        custom_prompt: promptDiffersFromDefault(agent) ? el('ag-prompt').value.trim() : null,
         extra_guidance: el('ag-guidance').value.trim() || null,
         confidence_threshold: threshold === '' ? null : Number(threshold),
       }),
@@ -289,6 +344,16 @@ async function saveAgent(id) {
   } catch (error) {
     status.textContent = String(error.message);
   }
+}
+
+function promptDiffersFromDefault(agent) {
+  const current = el('ag-prompt').value.trim();
+  return current !== '' && current !== agent.default_prompt.trim();
+}
+
+function restoreDefaultPrompt(event) {
+  event.preventDefault();
+  el('ag-prompt').value = agentCache.find(a => a.id === currentAgentId).default_prompt;
 }
 
 async function resetAgent(id) {

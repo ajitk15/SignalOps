@@ -27,6 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import time  # noqa: E402
 
+from agents import export as agent_export  # noqa: E402
 from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
 from agents.catalogue import get as catalogue_get  # noqa: E402
 from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
@@ -154,6 +155,9 @@ class AgentConfigRequest(BaseModel):
     forgotten in a validator.
     """
     model: str | None = None
+    # Full replacement for the task instructions. The safety preamble is
+    # prepended in code and is not reachable from here.
+    custom_prompt: str | None = Field(default=None, max_length=8000)
     extra_guidance: str | None = Field(default=None, max_length=4000)
     confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     requires_approval: bool | None = None
@@ -179,6 +183,10 @@ def _agent_view(spec, config, resolved) -> dict:
         "requires_approval": resolved.requires_approval,
         "enabled": resolved.enabled,
         "extra_guidance": getattr(config, "extra_guidance", None),
+        "custom_prompt": getattr(config, "custom_prompt", None),
+        # The shipped task prompt, so the editor can show what it is replacing
+        # and offer a revert.
+        "default_prompt": spec.system_prompt,
         "customised": config is not None,
     }
 
@@ -268,6 +276,37 @@ async def agent_prompt(agent_id: str,
         resolved = resolve(spec, config)
     return {"id": agent_id, "model": resolved.model, "tools": list(resolved.tools),
             "tier": resolved.tier.value, "system_prompt": resolved.system_prompt}
+
+
+def _workspace_agent_configs(session, workspace_id: str) -> dict:
+    return {c.agent_id: c for c in session.query(AgentConfig)
+            .filter(AgentConfig.workspace_id == workspace_id).all()}
+
+
+@app.get("/api/agents/{agent_id}/export")
+async def export_agent(agent_id: str,
+                       principal: Principal = Depends(require_role(Role.viewer))) -> Response:
+    """One agent as a Claude subagent definition file — lift and shift."""
+    spec = catalogue_get(agent_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    with session_scope() as session:
+        config = _workspace_agent_configs(session, principal.workspace_id).get(agent_id)
+        markdown = agent_export.to_markdown(spec, resolve(spec, config))
+    return Response(
+        content=markdown, media_type="text/markdown",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{agent_export.filename_for(spec)}"'})
+
+
+@app.get("/api/agents/export/bundle")
+async def export_agents(principal: Principal = Depends(require_role(Role.viewer))) -> Response:
+    """Every agent plus a README, as a zip."""
+    with session_scope() as session:
+        archive = agent_export.bundle(_workspace_agent_configs(session, principal.workspace_id))
+    return Response(
+        content=archive, media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="signalops-agents.zip"'})
 
 
 # --- audit -------------------------------------------------------------------

@@ -109,14 +109,21 @@ def check_tools(spec: AgentSpec) -> None:
                 f"{spec.tier.value!r}")
 
 
-def build_prompt(spec: AgentSpec, extra_guidance: str | None) -> str:
+def build_prompt(spec: AgentSpec, extra_guidance: str | None,
+                 custom_prompt: str | None = None) -> str:
     """Compose the system prompt.
 
     Order is deliberate: the safety preamble comes first and the user's guidance
     is appended inside an explicit lower-authority block, so the model is told
     what to do with it before it ever reads it.
+
+    `custom_prompt` fully replaces the shipped task instructions — you can tell
+    the agent to do something quite different. It cannot replace the preamble,
+    which is always prepended, so a rewritten task still runs under the same
+    injection defences and the same tool allowlist.
     """
-    prompt = f"{SAFETY_PREAMBLE}\n{spec.system_prompt}"
+    task = custom_prompt.strip() if custom_prompt and custom_prompt.strip() else spec.system_prompt
+    prompt = f"{SAFETY_PREAMBLE}\n{task}"
     if extra_guidance:
         prompt += (
             "\n\n<operator_guidance>\n"
@@ -138,8 +145,12 @@ def resolve(spec: AgentSpec, config=None) -> ResolvedAgent:
     check_tools(spec)
     model = getattr(config, "model", None) or spec.default_model
     guidance = getattr(config, "extra_guidance", None)
+    custom_prompt = getattr(config, "custom_prompt", None)
     check_model(model)
     check_guidance(guidance)
+    # A rewritten task prompt is held to the same rule as guidance: it may
+    # change what the agent does, never what it may reach.
+    check_guidance(custom_prompt)
 
     threshold = getattr(config, "confidence_threshold", None)
     if threshold is None:
@@ -154,7 +165,7 @@ def resolve(spec: AgentSpec, config=None) -> ResolvedAgent:
         model=model,
         tools=spec.tools,          # from code, never from config
         tier=spec.tier,            # from code, never from config
-        system_prompt=build_prompt(spec, guidance),
+        system_prompt=build_prompt(spec, guidance, custom_prompt),
         confidence_threshold=threshold,
         requires_approval=bool(requires_approval),
         enabled=bool(getattr(config, "enabled", True)),

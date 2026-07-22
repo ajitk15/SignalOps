@@ -176,6 +176,10 @@ class AgentConfig(Base):
     workspace_id = Column(String, ForeignKey("workspace.id"), nullable=False)
     agent_id = Column(String, nullable=False)
     model = Column(String, nullable=True)
+    # Full replacement for the agent's task prompt. The safety preamble is
+    # always prepended in code and is not part of this, so rewriting the task
+    # cannot remove the injection defences.
+    custom_prompt = Column(Text, nullable=True)
     extra_guidance = Column(Text, nullable=True)
     confidence_threshold = Column(Float, nullable=True)
     requires_approval = Column(Boolean, nullable=True)

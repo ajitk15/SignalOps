@@ -42,9 +42,39 @@ def session_scope() -> Session:
         session.close()
 
 
+def _add_missing_columns() -> None:
+    """Add nullable columns that exist on the models but not yet in the database.
+
+    create_all() creates missing tables but never alters existing ones, so a new
+    model field on a table that already exists fails at query time with "no such
+    column". While the schema is still in active design that will keep happening,
+    and a tiny additive migrator costs far less than wiring up Alembic for a
+    schema that changes every phase.
+
+    Deliberately additive only: no drops, renames or type changes. Anything
+    beyond adding a nullable column is a real migration and should get Alembic.
+    """
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present or not column.nullable:
+                    continue
+                ddl = column.type.compile(engine.dialect)
+                connection.execute(
+                    text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl}"))
+                logger.info("added column %s.%s", table.name, column.name)
+
+
 def init_db() -> str:
     """Create the schema and ensure a workspace exists. Returns its id."""
     Base.metadata.create_all(engine)
+    _add_missing_columns()
     with session_scope() as session:
         workspace = session.query(Workspace).first()
         if workspace is None:
