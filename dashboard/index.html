@@ -102,21 +102,41 @@
       background: var(--panel-2);
     }
 
+    /* Socket state, styled to match the collector pill beside it. The dot is a
+       ::before so the JS can keep setting plain text. */
     header .conn {
+      display: inline-flex;
+      align-items: center;
       font-size: 12px;
       color: var(--muted);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+
+    .conn::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-right: 6px;
+      flex: none;
     }
 
     .conn.live::before {
-      content: "●";
-      color: var(--ok);
-      margin-right: 6px;
+      background: var(--ok);
+    }
+
+    .conn.down {
+      color: var(--bad);
+      border-color: color-mix(in srgb, var(--bad) 45%, transparent);
     }
 
     .conn.down::before {
-      content: "●";
-      color: var(--bad);
-      margin-right: 6px;
+      background: var(--bad);
     }
 
     main {
@@ -821,20 +841,51 @@
     .health {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 6px;
       font-size: 12px;
       color: var(--muted);
     }
 
-    .health .sep {
-      opacity: .4;
+    /* Both header indicators read as the same object: a state dot plus the
+       word for it. No unlabelled dots. */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font: inherit;
+      color: var(--muted);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      white-space: nowrap;
+    }
+
+    button.status-pill {
+      cursor: pointer;
+    }
+
+    button.status-pill:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
+
+    .status-pill.failing {
+      color: var(--bad);
+      border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+    }
+
+    .status-pill.degraded {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 45%, transparent);
     }
 
     .health-dot {
       display: inline-block;
-      width: 9px;
-      height: 9px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
+      flex: none;
       cursor: default;
     }
 
@@ -1777,39 +1828,45 @@
     }
 
     // Collection can die independently of this socket, so "live" alone would be
-    // a misleading green light: one dot per collector, tooltip carrying the
-    // detail, summary text only when something is actually wrong.
+    // a misleading green light. One labelled pill rather than anonymous dots —
+    // a bare dot tells you nothing until you hover it.
     function renderCollectorHealth(collector) {
       const health = el('health');
       health.querySelectorAll('.coll').forEach(node => node.remove());
       const collectors = collector && collector.collectors ? Object.entries(collector.collectors) : [];
       if (!collectors.length) return;
-      const fragment = document.createDocumentFragment();
-      const sep = document.createElement('span');
-      sep.className = 'sep coll'; sep.textContent = '·';
-      fragment.appendChild(sep);
-      for (const [name, h] of collectors) {
-        const dot = document.createElement('span');
-        dot.className = `health-dot coll ${h.status || 'starting'}`;
-        dot.title = `${name}: ${h.status}`
-          + (h.last_error ? ` — ${h.last_error}` : '')
-          + (h.status === 'failing' ? ` (retry in ${h.next_attempt_in}s)` : '');
-        fragment.appendChild(dot);
+      const counts = {};
+      collectors.forEach(([, h]) => { counts[h.status] = (counts[h.status] || 0) + 1; });
+      const total = collectors.length;
+      let state = 'ok';
+      let text = `${total} collector${total === 1 ? '' : 's'} ok`;
+      if (counts.failing) {
+        state = 'failing';
+        text = `${counts.failing}/${total} failing · retry ${collector.next_attempt_in ?? '?'}s`;
+      } else if (counts.degraded) {
+        state = 'degraded';
+        text = `${counts.degraded}/${total} degraded · no readings`;
+      } else if (!counts.ok) {
+        state = 'starting';
+        text = 'collectors starting…';
       }
-      if (collector.status === 'failing' || collector.status === 'degraded') {
-        const label = document.createElement('span');
-        label.className = 'coll';
-        label.style.color = collector.status === 'failing' ? 'var(--bad)' : 'var(--warn)';
-        label.textContent = collector.status === 'failing'
-          ? `collector failing — retry in ${collector.next_attempt_in}s`
-          : 'collector degraded — no readings';
-        fragment.appendChild(label);
-        // Stale tiles must not keep implying their readings are current.
-        if (collector.status === 'failing') {
-          document.querySelectorAll('#tiles .tile .dot').forEach(dot => dot.className = 'dot unknown');
-        }
+
+      const pill = document.createElement('button');
+      pill.className = `status-pill coll ${state}`;
+      pill.innerHTML = `<span class="health-dot ${state}"></span>${esc(text)}`;
+      // Per-collector detail stays available without occupying header width.
+      pill.title = collectors.map(([name, h]) =>
+        `${name}: ${h.status}`
+        + (h.last_error ? ` — ${h.last_error}` : '')
+        + (h.status === 'failing' ? ` (retry in ${h.next_attempt_in}s)` : '')).join('\n')
+        + '\n\nClick for integration details';
+      pill.onclick = () => switchView('integrations');
+      health.appendChild(pill);
+
+      // Stale tiles must not keep implying their readings are current.
+      if (counts.failing) {
+        document.querySelectorAll('#tiles .tile .dot').forEach(dot => dot.className = 'dot unknown');
       }
-      health.appendChild(fragment);
     }
 
     const VIEWS = ['dashboard', 'agents', 'rules', 'integrations', 'kb', 'audit'];
