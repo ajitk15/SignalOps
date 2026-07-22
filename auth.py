@@ -177,6 +177,71 @@ def provider() -> AuthProvider:
     return _provider
 
 
+ADMIN_EMAIL_VAR = "SIGNALOPS_ADMIN_EMAIL"
+ADMIN_PASSWORD_VAR = "SIGNALOPS_ADMIN_PASSWORD"
+
+
+class AdminNotConfigured(Exception):
+    """No administrator can be established, so nobody could ever sign in."""
+
+
+def admin_from_env() -> tuple[str, str] | None:
+    email = (os.getenv(ADMIN_EMAIL_VAR) or "").strip().lower()
+    password = os.getenv(ADMIN_PASSWORD_VAR) or ""
+    return (email, password) if email and password else None
+
+
+def ensure_admin(session, workspace_id: str) -> User | None:
+    """Make the environment's administrator exist, and match the environment.
+
+    The administrator is configuration, not data. Everyone else is created by
+    that administrator from the UI.
+
+    This removes the last unauthenticated write endpoint: with a first-run web
+    form, anyone who reached a fresh instance before its owner did could claim
+    it. An account that can only be established by someone with access to the
+    server's environment cannot be claimed over the network at all.
+
+    The environment is the source of truth on every start, so the password is
+    re-applied at boot. That is deliberate — it means recovering a lost admin
+    password is "edit .env and restart" rather than a database surgery
+    procedure, and it means the file you read to find out who the admin is
+    cannot be out of date.
+    """
+    configured = admin_from_env()
+    if configured is None:
+        return None
+    email, password = configured
+    try:
+        hashed = hash_password(password)
+    except PasswordPolicy as error:
+        raise AdminNotConfigured(
+            f"{ADMIN_PASSWORD_VAR} is not acceptable: {error}") from error
+
+    user = (session.query(User)
+            .filter(User.workspace_id == workspace_id, User.email == email)
+            .one_or_none())
+    if user is None:
+        user = User(workspace_id=workspace_id, email=email,
+                    display_name=email.split("@")[0], role=Role.admin,
+                    password_hash=hashed, active=True)
+        session.add(user)
+        session.flush()
+        logger.info("created the administrator %s from the environment", email)
+        return user
+
+    # Re-assert everything the environment owns. An admin who was demoted or
+    # deactivated in the UI comes back on restart, which is what makes this a
+    # recovery path rather than just a seed.
+    user.password_hash = hashed
+    user.role = Role.admin
+    user.active = True
+    user.must_change_password = False
+    user.failed_logins = 0
+    user.locked_until = None
+    return user
+
+
 def set_password(user: User, password: str) -> None:
     user.password_hash = hash_password(password)
     user.must_change_password = False

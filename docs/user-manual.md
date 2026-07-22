@@ -15,7 +15,7 @@ Read time: about ten minutes. Setup time: about the same.
 ## Contents
 
 1. [What SignalOps does](#1-what-signalops-does)
-2. [First run — creating your account](#2-first-run--creating-your-account)
+2. [First run — signing in as the administrator](#2-first-run--signing-in-as-the-administrator)
 3. [Adding a ServiceNow connection](#3-adding-a-servicenow-connection)
 4. [Creating a workflow](#4-creating-a-workflow)
 5. [Reviewing and customising the agents](#5-reviewing-and-customising-the-agents)
@@ -62,35 +62,49 @@ suite blocks the PR regardless of what the review agent thinks.
 
 ---
 
-## 2. First run — creating your account
+## 2. First run — signing in as the administrator
+
+The administrator is **configuration, not data**. Set it where the server runs,
+in `.env`:
+
+```bash
+SIGNALOPS_ADMIN_EMAIL=admin@yourcompany.com
+SIGNALOPS_ADMIN_PASSWORD=a-long-password-you-choose
+```
 
 Start the server and open <http://localhost:8000>.
-
-On a fresh install there are no accounts, so the login screen becomes a
-first-run screen. There is no default password to change, because a default
-password is a published one.
 
 ```
 ┌──────────────────────────────────────────────┐
 │  ◆ SignalOps                                 │
 │                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │ First run. No accounts exist yet, so   │  │
-│  │ this creates the first administrator.  │  │
-│  └────────────────────────────────────────┘  │
+│  Email     [ admin@yourcompany.com       ]   │
+│  Password  [ ••••••••••••••••            ]   │
 │                                              │
-│  Email      [ you@company.com            ]   │
-│  Your name  [ Ajit                       ]   │
-│  Password   [ ••••••••••••               ]   │
-│  At least 10 characters.                     │
-│                                              │
-│            [ Create administrator ]          │
+│                [ Sign in ]                   │
 └──────────────────────────────────────────────┘
 ```
 
-Fill it in and continue. You are now an **admin**, and you are signed in.
+That is the whole login screen. **There is no sign-up, and no first-run form**,
+because there is no unauthenticated way to create an account at all — an
+endpoint that could create the first administrator is one that whoever reaches
+a fresh instance first can use to claim it. An account that can only be
+established by someone with access to the server's environment cannot be
+claimed over the network.
 
-Everyone else is invited from **Users** later — see [section 10](#10-users-and-roles).
+Everyone else is created by this administrator from the **Users** screen — see
+[section 10](#10-users-and-roles).
+
+### Three consequences worth knowing
+
+- **The environment wins on every start.** The admin's password, role and
+  active flag are re-applied at boot. Changing that password in the UI will not
+  survive a restart; change it in `.env` instead.
+- **That is also the recovery path.** Locked out, or someone deactivated the
+  admin? Edit `.env`, restart, and you are back in. No database surgery.
+- **The server refuses to start** if no administrator is configured and none
+  exists. Serving a login screen nobody could get past is a worse failure than
+  not starting, because it looks like the app is working.
 
 ---
 
@@ -141,9 +155,12 @@ so changing a queue name does not mean retyping a secret.
 
 Being exact about the limit: the encryption key lives on the same machine as
 the database. That protects against a stolen database file or a stray backup.
-It does not protect against someone who can read both files. If you need real
-custody, put the key in `SIGNALOPS_SECRET_KEY` and manage it with whatever your
-organisation uses.
+It does not protect against someone who can read both files.
+
+Set `SIGNALOPS_SECRET_KEY` to supply the key yourself — from a vault, a KMS, or
+your orchestrator's secret injection — and the platform never writes a key to
+disk at all. Moving custody to a dedicated secret manager is the intended
+destination; the environment variable is the seam it plugs into.
 
 ---
 
@@ -372,6 +389,11 @@ directory.
 and an initial password. They will be asked to change it when they first sign
 in, since you know the one you chose.
 
+The administrator from `.env` appears in this list like anyone else, but is
+re-asserted from the environment at every start — so demoting or deactivating
+it in the UI is temporary. Promote a second admin here if you want one that the
+environment does not own.
+
 | Role | Can |
 |---|---|
 | **Viewer** | See everything. Change nothing. |
@@ -425,6 +447,11 @@ response for a user that does not exist. If the same account signs in at
 Different problem entirely. The credential was accepted; the account lacks a
 role for that table. Grant it read on `incident` and, if you want work notes,
 write.
+
+### "No administrator exists and none is configured"
+
+The server will not start. Set `SIGNALOPS_ADMIN_EMAIL` and
+`SIGNALOPS_ADMIN_PASSWORD` in `.env` (at least 10 characters) and restart.
 
 ### Every result says "simulated"
 

@@ -31,9 +31,10 @@ from agents import export as agent_export  # noqa: E402
 from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
 from agents.catalogue import get as catalogue_get  # noqa: E402
 from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
-from auth import (SESSION_COOKIE, InvalidCredentials, PasswordPolicy,  # noqa: E402
-                  Principal, current_principal, hash_password, issue_session,
-                  provider, record_login, require_role, set_password)
+from auth import (SESSION_COOKIE, AdminNotConfigured, InvalidCredentials,  # noqa: E402
+                  PasswordPolicy, Principal, admin_from_env, current_principal,
+                  ensure_admin, hash_password, issue_session, provider,
+                  record_login, require_role, set_password)
 from db import audit, audit_entries, init_db, session_scope  # noqa: E402
 from engine import workflow_export  # noqa: E402
 from engine.approvals import StaleApproval  # noqa: E402
@@ -67,6 +68,35 @@ app = FastAPI(title="SignalOps")
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 STATIC_FILES = {"app.css", "app.js"}
 WORKSPACE_ID = init_db()
+
+
+def _establish_admin() -> None:
+    """Create the environment's administrator, or refuse to start.
+
+    Starting without one would serve a login screen nobody on earth could get
+    past, which is a worse failure than not starting: it looks like the app is
+    working.
+    """
+    with session_scope() as session:
+        try:
+            admin = ensure_admin(session, WORKSPACE_ID)
+        except AdminNotConfigured as error:
+            raise RuntimeError(str(error)) from error
+        if admin is not None:
+            logger.info("administrator %s is configured from the environment", admin.email)
+            return
+        if session.query(User).first() is None:
+            raise RuntimeError(
+                "No administrator exists and none is configured. Set "
+                "SIGNALOPS_ADMIN_EMAIL and SIGNALOPS_ADMIN_PASSWORD in .env, then "
+                "restart. Every other user is created by that administrator from "
+                "the Users screen.")
+        logger.warning(
+            "SIGNALOPS_ADMIN_EMAIL is not set. Existing accounts still work, but "
+            "there is no way to recover admin access if it is lost.")
+
+
+_establish_admin()
 
 
 # --- shell -------------------------------------------------------------------
@@ -120,56 +150,17 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=300)
 
 
-class BootstrapRequest(BaseModel):
-    """The first administrator. Accepted only while no user exists."""
-    email: str = Field(min_length=3, max_length=200)
-    display_name: str = Field(min_length=1, max_length=80)
-    password: str = Field(min_length=1, max_length=300)
-
-
 @app.get("/api/auth/state")
 async def auth_state() -> dict:
     """What the login screen needs before anyone has signed in.
 
-    `needs_bootstrap` is why this is unauthenticated: a fresh install has no
-    account to sign in with, and the alternative to a first-run screen is a
-    seeded default password, which is a published credential.
+    There is no account-creation endpoint here any more. The administrator
+    comes from the environment and everyone else is created by that
+    administrator, so there is nothing unauthenticated to call.
     """
-    with session_scope() as session:
-        any_user = session.query(User).first() is not None
-    return {"needs_bootstrap": not any_user,
-            "provider": provider().name,
-            "verifies_identity": provider().verifies_identity}
-
-
-@app.post("/api/auth/bootstrap")
-async def bootstrap(payload: BootstrapRequest, response: Response) -> dict:
-    """Create the first administrator. Refused once any user exists."""
-    with session_scope() as session:
-        if session.query(User).first() is not None:
-            # Not 403: the endpoint stops existing in a meaningful sense once
-            # there is somebody to authenticate as.
-            raise HTTPException(status_code=409,
-                                detail="this workspace already has users; sign in instead")
-        try:
-            hashed = hash_password(payload.password)
-        except PasswordPolicy as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        user = User(workspace_id=WORKSPACE_ID, email=payload.email.strip().lower(),
-                    display_name=payload.display_name.strip(), role=Role.admin,
-                    password_hash=hashed, identity_verified=True,
-                    last_login_at=time.time())
-        session.add(user)
-        session.flush()
-        workspace = session.get(Workspace, WORKSPACE_ID)
-        principal = Principal(user, workspace)
-        token = issue_session(user)
-        audit(session, actor=user.display_name, action="workspace_bootstrapped",
-              entity_type="user", entity_id=user.id, workspace_id=WORKSPACE_ID,
-              actor_verified=True, detail={"email": user.email})
-        view = principal.as_dict()
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
-    return view
+    return {"provider": provider().name,
+            "verifies_identity": provider().verifies_identity,
+            "admin_configured": admin_from_env() is not None}
 
 
 @app.post("/api/auth/login")

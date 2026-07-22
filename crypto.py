@@ -22,6 +22,12 @@ Set `SIGNALOPS_SECRET_KEY` to control the key. Without it, one is generated and
 written next to the database with owner-only permissions, and rotating it
 invalidates every stored secret — deliberately, since a key that can be lost
 silently is a key whose absence you discover during an incident.
+
+**Where this is going.** `SIGNALOPS_SECRET_KEY` is the seam a real secret
+manager plugs into: supply the key from Vault, a cloud KMS or an orchestrator's
+secret injection and nothing is written to disk here at all. Moving custody
+there is the intended destination — this module deliberately has one place the
+key comes from, so that change is a resolver swap rather than a rewrite.
 """
 from __future__ import annotations
 

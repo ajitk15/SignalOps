@@ -31,37 +31,30 @@ const VIEW_TITLES = Object.fromEntries(
 
 // --- authentication ---------------------------------------------------------
 
-let needsBootstrap = false;
-
 async function loadAuthState() {
+  // Nothing here creates an account. The administrator comes from the server's
+  // environment; everyone else is created by that administrator.
   try {
     const state = await (await fetch('/api/auth/state')).json();
-    needsBootstrap = state.needs_bootstrap;
-  } catch { needsBootstrap = false; }
-  el('bootstrap-note').classList.toggle('hidden', !needsBootstrap);
-  el('login-name').classList.toggle('hidden', !needsBootstrap);
-  el('login-name-label').classList.toggle('hidden', !needsBootstrap);
-  el('login-submit').textContent = needsBootstrap ? 'Create administrator' : 'Sign in';
-  el('login-password').setAttribute('autocomplete',
-    needsBootstrap ? 'new-password' : 'current-password');
-  el('login-hint').textContent = needsBootstrap
-    ? 'At least 10 characters. Length is what makes a password expensive to guess.'
-    : '';
+    const note = el('bootstrap-note');
+    note.classList.toggle('hidden', state.admin_configured);
+    if (!state.admin_configured) {
+      note.innerHTML = '<strong>No administrator is configured.</strong> Set '
+        + '<code>SIGNALOPS_ADMIN_EMAIL</code> and <code>SIGNALOPS_ADMIN_PASSWORD</code> '
+        + 'where the server runs, then restart.';
+    }
+  } catch { /* the login form still works without this */ }
 }
 
 async function doLogin(event) {
   event.preventDefault();
   const status = el('login-status');
-  status.textContent = needsBootstrap ? 'Creating your account…' : 'Signing in…';
-  const body = needsBootstrap
-    ? { email: el('login-email').value.trim(),
-        display_name: el('login-name').value.trim() || el('login-email').value.split('@')[0],
-        password: el('login-password').value }
-    : { email: el('login-email').value.trim(), password: el('login-password').value };
+  status.textContent = 'Signing in…';
   try {
-    const response = await fetch(needsBootstrap ? '/api/auth/bootstrap' : '/api/auth/login', {
+    const response = await fetch('/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ email: el('login-email').value.trim(),
+                             password: el('login-password').value }),
     });
     if (!response.ok) throw new Error((await response.json()).detail || 'sign-in failed');
     principal = await response.json();
