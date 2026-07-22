@@ -297,6 +297,8 @@ async function testConnection() {
   target.innerHTML = result.ok
     ? `<span class="tier-badge ok">connected</span> ${esc(result.detail)}${
         result.writes_available ? '' : ' Write credentials are not set, so work notes will be recorded rather than sent.'}`
+    // The failure text explains what the status code can and cannot tell you,
+    // so it is shown in full rather than summarised to "failed".
     : `<span class="tier-badge bad">failed</span> ${esc(result.detail)}`;
 }
 
@@ -1072,6 +1074,7 @@ async function renderConnections() {
           ${data.missing_for_reads.length ? 'reads unavailable' : 'reads ready'}</span>
         <span class="tier-badge ${data.missing_for_writes.length ? '' : 'ok'}">
           ${data.missing_for_writes.length ? 'writes unavailable' : 'writes ready'}</span>
+        <span class="tier-badge">${esc(data.auth_method)} auth</span>
       </div>
       ${Object.entries(data.environment).map(([name, present]) => `
         <div class="audit-row">
@@ -1081,6 +1084,12 @@ async function renderConnections() {
       <p class="field-hint">Reads use a separate account from writes on purpose: the write
         account needs only enough permission to append a work note and set a state, so what
         the workflow can do is bounded by the credential and not only by the prompt.</p>
+      ${data.auth_method === 'basic' ? `<p class="field-hint">Using <strong>HTTP Basic</strong>.
+        Many instances refuse basic authentication for the REST API while still accepting the
+        same credential at the login page — which returns a 401 identical to a wrong password.
+        Set <code>SN_CLIENT_ID</code> and <code>SN_CLIENT_SECRET</code> to switch to OAuth.</p>`
+        : '<p class="field-hint">Using <strong>OAuth</strong>. Tokens are held in memory only, '
+          + 'never stored and never returned by any endpoint.</p>'}
       ${data.missing_for_writes.length && !data.missing_for_reads.length ? `
         <p class="field-hint">Without write credentials the workflow still runs end to end and
         records the work note it would have posted.</p>` : ''}

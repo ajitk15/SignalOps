@@ -522,6 +522,7 @@ async def list_connections(principal: Principal = Depends(require_role(Role.view
         "environment": servicenow.env_status(),
         "missing_for_reads": servicenow.missing_env(for_writes=False),
         "missing_for_writes": servicenow.missing_env(for_writes=True),
+        "auth_method": servicenow.auth_method(),
     }
 
 
@@ -554,8 +555,12 @@ async def test_connection(principal: Principal = Depends(require_role(Role.opera
     try:
         await asyncio.to_thread(client.test)
     except servicenow.ServiceNowError as error:
-        return {"ok": False, "detail": str(error)}
-    return {"ok": True, "detail": "Read credentials work.",
+        # The message explains what a 401 might actually mean; passing it
+        # through is the point, since "failed" alone sends people hunting.
+        return {"ok": False, "detail": str(error), "auth_method": client.auth_method}
+    return {"ok": True,
+            "detail": f"Read credentials work ({client.auth_method} authentication).",
+            "auth_method": client.auth_method,
             "writes_available": not servicenow.missing_env(for_writes=True)}
 
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -43,6 +45,18 @@ ENV_VARS = {
     "write_password": "SN_WRITE_PASSWORD",
 }
 
+# OAuth, optional. Present means OAuth is used; absent means basic auth.
+#
+# Not an alternative for its own sake: ServiceNow instances increasingly refuse
+# HTTP Basic for the REST API while still accepting the same credential at the
+# UI login form, which produces a 401 that looks exactly like a wrong password.
+# Create these under System OAuth → Application Registry → "Create an OAuth API
+# endpoint for external clients".
+OAUTH_ENV_VARS = {
+    "client_id": "SN_CLIENT_ID",
+    "client_secret": "SN_CLIENT_SECRET",
+}
+
 # ServiceNow incident state codes. 6 = Resolved.
 STATE_RESOLVED = "6"
 
@@ -50,6 +64,15 @@ STATE_RESOLVED = "6"
 class ServiceNowError(Exception):
     """A call failed. Carries a message safe to show a user — never the
     credentials or the full response body."""
+
+
+class ServiceNowAuthError(ServiceNowError):
+    """Authentication itself failed, as opposed to the request being refused.
+
+    Worth its own type because the two need completely different responses: a
+    403 means "grant this account a role", a 401 means "this credential is not
+    being accepted at all", and conflating them sends people to the wrong screen.
+    """
 
 
 @dataclass(frozen=True)
@@ -67,7 +90,15 @@ class WriteResult:
 
 def env_status() -> dict[str, bool]:
     """Which variables are present. Values are never returned."""
-    return {name: bool(os.getenv(name)) for name in ENV_VARS.values()}
+    names = list(ENV_VARS.values()) + list(OAUTH_ENV_VARS.values())
+    return {name: bool(os.getenv(name)) for name in names}
+
+
+def auth_method() -> str:
+    """Which scheme a client built now would use. Shown in the UI so "it is
+    still using basic auth" is visible rather than inferred."""
+    client_id, client_secret = _oauth_credentials()
+    return "oauth" if client_id and client_secret else "basic"
 
 
 def missing_env(*, for_writes: bool) -> list[str]:
@@ -77,18 +108,150 @@ def missing_env(*, for_writes: bool) -> list[str]:
     return [name for name in needed if not os.getenv(name)]
 
 
-class ServiceNowClient:
-    def __init__(self, base_url: str, user: str, password: str) -> None:
+class OAuthTokenProvider:
+    """Exchanges a password for a bearer token, and keeps it until it expires.
+
+    The token lives in memory and nowhere else. It is never written to the
+    database, never returned by an API, and never logged — the password it came
+    from is already handled that way and a token is a password with a clock on
+    it.
+
+    ServiceNow's password grant is used rather than client credentials because
+    it preserves *who* the integration is acting as: the work notes and state
+    changes still carry the read or write account, so the audit trail on the
+    ServiceNow side stays as legible as it was with basic auth.
+    """
+
+    # Refresh a little early. A token that expires between the check and the
+    # call produces a 401 that looks like an auth failure.
+    EXPIRY_MARGIN_SECONDS = 60
+
+    def __init__(self, base_url: str, client_id: str, client_secret: str,
+                 username: str, password: str) -> None:
         self.base_url = base_url.rstrip("/")
-        self._auth = (user, password)
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._username = username
+        self._password = password
+        self._token: str | None = None
+        self._expires_at: float = 0.0
+        self._refresh_token: str | None = None
+        self._lock = threading.Lock()
+
+    def token(self) -> str:
+        with self._lock:
+            if self._token and time.time() < self._expires_at - self.EXPIRY_MARGIN_SECONDS:
+                return self._token
+            return self._fetch()
+
+    def invalidate(self) -> None:
+        """Drop the cached token so the next call fetches a fresh one."""
+        with self._lock:
+            self._token = None
+            self._expires_at = 0.0
+
+    def _fetch(self) -> str:
+        payload = {"grant_type": "refresh_token", "refresh_token": self._refresh_token,
+                   "client_id": self._client_id, "client_secret": self._client_secret} \
+            if self._refresh_token else \
+            {"grant_type": "password", "client_id": self._client_id,
+             "client_secret": self._client_secret,
+             "username": self._username, "password": self._password}
+        try:
+            response = httpx.post(f"{self.base_url}/oauth_token.do", data=payload,
+                                  timeout=TIMEOUT)
+        except httpx.HTTPError as error:
+            raise ServiceNowAuthError(
+                f"could not reach the token endpoint: {type(error).__name__}") from error
+
+        if response.status_code != 200:
+            if self._refresh_token:
+                # The refresh token expired or was revoked; fall back to the
+                # password grant once rather than failing the whole run.
+                self._refresh_token = None
+                return self._fetch()
+            raise ServiceNowAuthError(_explain_token_failure(response))
+
+        body = response.json()
+        self._token = body.get("access_token")
+        self._refresh_token = body.get("refresh_token") or self._refresh_token
+        self._expires_at = time.time() + float(body.get("expires_in") or 1800)
+        if not self._token:
+            raise ServiceNowAuthError("the token endpoint returned no access token")
+        logger.info("obtained a ServiceNow OAuth token for %s", self._username)
+        return self._token
+
+
+def _explain_token_failure(response) -> str:
+    """Turn ServiceNow's OAuth error into something actionable.
+
+    The raw errors are terse and the causes are specific, so mapping them is
+    worth more than passing the string through — `invalid_client` sends someone
+    to the Application Registry, `invalid_grant` to the user record.
+    """
+    try:
+        body = response.json()
+    except Exception:                                  # noqa: BLE001
+        body = {}
+    code = body.get("error", "")
+    hints = {
+        "invalid_client": "the client ID or secret is wrong — check the entry under "
+                          "System OAuth → Application Registry",
+        "invalid_grant": "the instance accepted the client but rejected the username or "
+                         "password. If the account has multi-factor authentication "
+                         "enabled, the password grant cannot satisfy it",
+        "unauthorized_client": "this OAuth application is not permitted to use the "
+                               "password grant",
+    }
+    hint = hints.get(code, body.get("error_description") or "")
+    return f"OAuth token request failed ({response.status_code}{': ' + code if code else ''})" \
+           + (f" — {hint}" if hint else "")
+
+
+class ServiceNowClient:
+    """One client, two ways of proving who it is.
+
+    Basic auth stays the default because it needs no setup. OAuth is used the
+    moment client credentials are present, because an instance that refuses
+    basic auth for REST returns a 401 indistinguishable from a wrong password —
+    so having the alternative already wired is what makes that diagnosable
+    rather than a dead end.
+    """
+
+    def __init__(self, base_url: str, user: str, password: str,
+                 client_id: str | None = None, client_secret: str | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._basic = (user, password)
+        self._oauth = (
+            OAuthTokenProvider(base_url, client_id, client_secret, user, password)
+            if client_id and client_secret else None)
+
+    @property
+    def auth_method(self) -> str:
+        return "oauth" if self._oauth else "basic"
 
     # --- plumbing ------------------------------------------------------------
+
+    def _send(self, method: str, url: str, **kwargs):
+        headers = {"Accept": "application/json", **kwargs.pop("headers", {})}
+        if self._oauth:
+            headers["Authorization"] = f"Bearer {self._oauth.token()}"
+            return httpx.request(method, url, timeout=TIMEOUT, headers=headers, **kwargs)
+        return httpx.request(method, url, auth=self._basic, timeout=TIMEOUT,
+                             headers=headers, **kwargs)
 
     def _request(self, method: str, path: str, **kwargs):
         url = f"{self.base_url}/api/now/{path.lstrip('/')}"
         try:
-            response = httpx.request(method, url, auth=self._auth, timeout=TIMEOUT,
-                                     headers={"Accept": "application/json"}, **kwargs)
+            response = self._send(method, url, **kwargs)
+            if response.status_code == 401 and self._oauth:
+                # A token can expire between the expiry check and the call, or
+                # be revoked server-side. One retry with a fresh token separates
+                # that from a credential that is genuinely not accepted.
+                self._oauth.invalidate()
+                response = self._send(method, url, **kwargs)
+            if response.status_code in (401, 403):
+                raise ServiceNowAuthError(_explain_rejection(response, self.auth_method))
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
             # Status and reason only. A ServiceNow error body can echo the query
@@ -146,18 +309,53 @@ class ServiceNowClient:
         self._request("PATCH", f"table/incident/{sys_id}", json=fields)
 
 
+def _explain_rejection(response, auth_method: str) -> str:
+    """Say what a 401 or 403 actually means, and where to go next.
+
+    These two are constantly confused and the remedies are unrelated. A 403 is
+    a role problem on the account. A 401 over basic auth is very often not a
+    wrong password at all — instances increasingly refuse HTTP Basic for REST
+    while still accepting the same credential at the UI login form, and the
+    response is identical to the one a nonexistent user gets. Saying so here
+    saves the hour it otherwise costs to work out.
+    """
+    if response.status_code == 403:
+        return ("ServiceNow accepted the credential but refused the request (403). "
+                "The account is authenticated and lacks a role for this table.")
+    if auth_method == "oauth":
+        return ("ServiceNow rejected the OAuth token (401). The token was refreshed and "
+                "retried once. Check that the OAuth application is active and that the "
+                "account is not locked.")
+    return ("ServiceNow rejected the credential (401). Note that this is the same "
+            "response the instance gives for a user that does not exist, so it does not "
+            "by itself mean the password is wrong. If the same account can sign in at "
+            "/login.do, the instance is refusing HTTP Basic for the REST API — set "
+            f"{OAUTH_ENV_VARS['client_id']} and {OAUTH_ENV_VARS['client_secret']} to use "
+            "OAuth instead, or check whether the account has multi-factor authentication "
+            "enabled, which basic auth cannot satisfy.")
+
+
+def _oauth_credentials() -> tuple[str | None, str | None]:
+    return (os.getenv(OAUTH_ENV_VARS["client_id"]),
+            os.getenv(OAUTH_ENV_VARS["client_secret"]))
+
+
 def reader() -> ServiceNowClient | None:
     url = os.getenv(ENV_VARS["instance"], "")
     user = os.getenv(ENV_VARS["read_user"])
     password = os.getenv(ENV_VARS["read_password"])
-    return ServiceNowClient(url, user, password) if url and user and password else None
+    client_id, client_secret = _oauth_credentials()
+    return (ServiceNowClient(url, user, password, client_id, client_secret)
+            if url and user and password else None)
 
 
 def writer() -> ServiceNowClient | None:
     url = os.getenv(ENV_VARS["instance"], "")
     user = os.getenv(ENV_VARS["write_user"])
     password = os.getenv(ENV_VARS["write_password"])
-    return ServiceNowClient(url, user, password) if url and user and password else None
+    client_id, client_secret = _oauth_credentials()
+    return (ServiceNowClient(url, user, password, client_id, client_secret)
+            if url and user and password else None)
 
 
 class TicketSink:
