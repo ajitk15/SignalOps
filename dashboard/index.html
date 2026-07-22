@@ -11,33 +11,77 @@
 </head>
 
 <body>
-  <header>
-    <div class="brand">
-      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-        <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
-        <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
-          stroke-linecap="round" stroke-linejoin="round" />
-        <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
-      </svg>
-      <h1 id="app-title">Signal<span class="ops">Ops</span></h1>
-    </div>
-    <div class="header-actions">
-      <span class="status-pill" id="build-state">checking…</span>
-    </div>
-  </header>
-
-  <main>
-    <section>
-      <h2>Rebuilding</h2>
-      <div class="pipeline-note">
-        <strong>SignalOps v2 is under construction on this branch.</strong>
-        The monitoring pipeline has been removed. The workflow platform — login, onboarding,
-        the agent catalogue and the two workflows — is being built in its place.
+  <!-- Login gate. Shown until /api/auth/me succeeds. -->
+  <div id="login-screen" class="login-screen hidden">
+    <form class="login-card" id="login-form" onsubmit="doLogin(event)">
+      <div class="brand login-brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
+          <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
+        </svg>
+        <h1>Signal<span class="ops">Ops</span></h1>
       </div>
-      <div id="phases" class="kb-library"></div>
-    </section>
-  </main>
 
+      <div class="login-warning">
+        <strong>Identity is not verified.</strong> This build uses a placeholder login — any name and
+        role is accepted, and no password is checked. Audit entries record a <em>claimed</em>
+        identity. The server refuses to start outside a local environment for this reason.
+      </div>
+
+      <label for="login-name">Your name</label>
+      <input id="login-name" class="draft-field" placeholder="e.g. Ajit" required autocomplete="off" />
+
+      <label for="login-role">Role</label>
+      <select id="login-role" class="draft-field">
+        <option value="viewer">Viewer — read only</option>
+        <option value="operator" selected>Operator — run workflows</option>
+        <option value="approver">Approver — decide on human gates</option>
+        <option value="admin">Admin — settings and kill switch</option>
+      </select>
+      <p class="dialog-note">Roles are enforced by the server, so this choice genuinely changes what
+        you can do.</p>
+
+      <p><button class="button" type="submit">Continue</button></p>
+      <p id="login-status" class="dialog-note"></p>
+    </form>
+  </div>
+
+  <!-- Application shell. Operate above the line, Configure below it. -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand sidebar-brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
+          <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
+        </svg>
+        <h1>Signal<span class="ops">Ops</span></h1>
+      </div>
+
+      <nav id="nav"></nav>
+
+      <div class="sidebar-foot">
+        <div id="who" class="who"></div>
+        <button class="button ghost" onclick="doLogout()">Sign out</button>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="content-head">
+        <h2 id="view-title">Workflows</h2>
+        <div class="header-actions">
+          <span id="killswitch-pill" class="status-pill hidden"></span>
+          <span id="conn" class="conn down">connecting…</span>
+        </div>
+      </header>
+      <main id="view"></main>
+    </div>
+  </div>
+
+  <div id="toast" role="status"></div>
   <script src="/static/app.js" defer></script>
 </body>
 
