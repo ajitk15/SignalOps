@@ -109,6 +109,7 @@ class RuleRequest(BaseModel):
     # decision to the Diagnostician, and omitting it falls back to P3.
     severity: str | None = Field(default=None, pattern=r"^(P[1-4]|ai)$")
     ai_provisional: str | None = Field(default=None, pattern=r"^P[1-4]$")
+    platform: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,32}$")
     message: str = Field(min_length=3, max_length=200)
     escalate: dict | None = None
 
@@ -150,6 +151,8 @@ def _rule_from(payload: RuleRequest) -> dict:
         raise HTTPException(status_code=422, detail="not_in requires a values list")
     rule = {"id": payload.id, "when": {"metric": payload.metric},
             "condition": payload.condition, "message": payload.message}
+    if payload.platform:
+        rule["platform"] = payload.platform
     if payload.severity:
         rule["severity"] = payload.severity
     if payload.severity == "ai" and payload.ai_provisional:
@@ -159,22 +162,52 @@ def _rule_from(payload: RuleRequest) -> dict:
     return rule
 
 
+def _rule_catalog() -> dict:
+    if not RULE_TEMPLATES_PATH.exists():
+        return {"platforms": [], "shared_metrics": []}
+    return yaml.safe_load(RULE_TEMPLATES_PATH.read_text(encoding="utf-8"))
+
+
+def _resolve_platform(rule: dict, catalog: dict) -> str:
+    """Which platform a rule belongs to.
+
+    An explicit `platform:` wins. Otherwise infer from the metric via each
+    platform's declared vocabulary, so the shipped rules group correctly with
+    no migration. Metrics listed as shared (error_count and friends) are
+    genuinely cross-platform, so a rule built only from those is "common" —
+    attributing it to whichever platform lists it first would be a wrong badge,
+    and a wrong badge is worse than an honest one. Anything unrecognised is
+    "other".
+    """
+    if rule.get("platform"):
+        return rule["platform"]
+    metric = (rule.get("when") or {}).get("metric")
+    metrics = {metric} if isinstance(metric, str) else set(metric or [])
+    shared = set(catalog.get("shared_metrics") or [])
+    specific = metrics - shared
+    for platform in catalog.get("platforms", []):
+        if specific & set(platform.get("metrics", [])):
+            return platform["id"]
+    return "common" if metrics & shared else "other"
+
+
 @app.get("/api/rules")
 async def api_list_rules() -> dict:
     builtin = _builtin_rules()
     custom = _load_custom_rules()
+    catalog = _rule_catalog()
     overrides = {rule["id"]: rule for rule in custom}
     builtin_view = []
     for rule in builtin:
         override = overrides.get(rule["id"])
-        builtin_view.append({**(override or rule), "origin": "built-in",
-                             "overridden": override is not None and not override.get("disabled"),
-                             "disabled": bool(override and override.get("disabled"))})
+        merged = {**(override or rule), "origin": "built-in",
+                  "overridden": override is not None and not override.get("disabled"),
+                  "disabled": bool(override and override.get("disabled"))}
+        builtin_view.append({**merged, "platform": _resolve_platform(merged, catalog)})
     builtin_ids = {rule["id"] for rule in builtin}
-    custom_view = [{**rule, "origin": "custom"} for rule in custom if rule["id"] not in builtin_ids]
-    templates = yaml.safe_load(RULE_TEMPLATES_PATH.read_text(encoding="utf-8"))["categories"] \
-        if RULE_TEMPLATES_PATH.exists() else []
-    return {"builtin": builtin_view, "custom": custom_view, "templates": templates}
+    custom_view = [{**rule, "origin": "custom", "platform": _resolve_platform(rule, catalog)}
+                   for rule in custom if rule["id"] not in builtin_ids]
+    return {"builtin": builtin_view, "custom": custom_view, "platforms": catalog.get("platforms", [])}
 
 
 @app.post("/api/rules")
