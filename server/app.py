@@ -73,6 +73,19 @@ app = FastAPI(lifespan=lifespan)
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 
 
+@app.get("/static/{filename}")
+async def static_asset(filename: str) -> FileResponse:
+    """Serve the dashboard's CSS/JS siblings.
+
+    Same no-cache treatment as index.html: these now carry the code that
+    changes, so a stale copy is the same bug class as a stale page. Restricted
+    to a known set rather than any path under the directory.
+    """
+    if filename not in {"app.css", "app.js"}:
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(DASHBOARD_DIR / filename, headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/")
 async def index() -> FileResponse:
     # "no-cache" means revalidate on every load, not "don't store". Without it
