@@ -172,8 +172,12 @@ class CodeAgentPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.workspace.clone()
         self.addCleanup(self.workspace.cleanup)
         self.refusals = []
+        from agents.catalogue import get
+        from agents.guard import resolve
         from engine.coder import _permission_callback
-        self.callback = _permission_callback(self.workspace, self.refusals)
+        # The tier now decides the allowlist, so the callback needs the agent.
+        self.agent = resolve(get("implementer"))
+        self.callback = _permission_callback(self.agent, self.workspace, self.refusals)
 
     async def test_a_shell_is_refused(self):
         """The Agent SDK ships one and it is a way to reach everything the

@@ -31,21 +31,18 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agents.guard import ResolvedAgent
+from agents.guard import (SDK_TOOLS_NEVER_GRANTED, GuardrailViolation,
+                          ResolvedAgent, assert_sdk_tool_allowed, sdk_tools_for)
 from engine.budget import cost_of
 from integrations.repo import RepoWorkspace, is_protected
 
 logger = logging.getLogger("engine.coder")
 
-# What the implementer may use. Read-and-edit within the clone, nothing that
-# reaches the network or a shell.
-CODE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"]
-
-# Named explicitly rather than relying on the allowlist alone. Two independent
-# statements of the same restriction is the point: a future default that turns
-# an unlisted tool on still meets this.
-FORBIDDEN_TOOLS = ["Bash", "WebFetch", "WebSearch", "Agent", "Task",
-                   "NotebookEdit", "Monitor"]
+# The tool list is derived from the agent's declared tier (see
+# agents.guard.sdk_tools_for), not written out here. A hardcoded list at the
+# call site would mean retiering an agent in the catalogue changed a label and
+# nothing else.
+FORBIDDEN_TOOLS = list(SDK_TOOLS_NEVER_GRANTED)
 
 MAX_TURNS = 40
 
@@ -69,20 +66,20 @@ class CodeAgentUnavailable(Exception):
     """No credential, so no code was written. Not a failure of the change."""
 
 
-def _permission_callback(workspace: RepoWorkspace, refusals: list[str]):
+def _permission_callback(agent: ResolvedAgent, workspace: RepoWorkspace,
+                         refusals: list[str]):
     """Veto writes outside the allowlist, at the moment they are attempted."""
 
     async def can_use_tool(tool_name: str, tool_input: dict, context):
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-        if tool_name in FORBIDDEN_TOOLS:
-            reason = f"{tool_name} is not available to this agent"
-            refusals.append(reason)
-            return PermissionResultDeny(message=reason)
-        if tool_name not in ("Edit", "Write", "Read", "Glob", "Grep"):
-            reason = f"{tool_name} is outside this agent's allowlist"
-            refusals.append(reason)
-            return PermissionResultDeny(message=reason)
+        # The tier decides, not a list written out here. An agent below
+        # write_code is refused Edit and Write by this call alone.
+        try:
+            assert_sdk_tool_allowed(agent, tool_name)
+        except GuardrailViolation as violation:
+            refusals.append(str(violation))
+            return PermissionResultDeny(message=str(violation))
 
         path = tool_input.get("file_path") or tool_input.get("path")
         if path and tool_name in ("Edit", "Write"):
@@ -142,9 +139,9 @@ async def implement(*, agent: ResolvedAgent, workspace: RepoWorkspace, ticket: d
         # The system prompt is the resolved one — same safety preamble, same
         # operator guidance, same customisation as every other agent.
         system_prompt=agent.system_prompt,
-        allowed_tools=CODE_TOOLS,
+        allowed_tools=sdk_tools_for(agent),
         disallowed_tools=FORBIDDEN_TOOLS,
-        can_use_tool=_permission_callback(workspace, refusals),
+        can_use_tool=_permission_callback(agent, workspace, refusals),
         cwd=str(workspace.path),
         model=agent.model,
         max_turns=MAX_TURNS,

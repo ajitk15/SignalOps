@@ -98,13 +98,20 @@ def _normalise(path: str) -> str:
 
 
 def _matches(path: str, pattern: str) -> bool:
-    """fnmatch, with `**` meaning "zero or more directories".
+    """fnmatch, with two corrections that matter here.
 
-    fnmatch has no notion of `**`; its `*` already crosses `/`, so `secrets/**/*`
-    alone would require at least two path segments and let `secrets/db.yaml`
-    through. Collapsing the `**` covers the zero-directory case.
+    **`**` means "zero or more directories".** fnmatch has no notion of it; its
+    `*` already crosses `/`, so `secrets/**/*` alone would require at least two
+    path segments and let `secrets/db.yaml` through.
+
+    **A pattern with no `/` matches the file wherever it lives.** `id_rsa*` and
+    `.env` are descriptions of a *kind of file*, not of a location, so matching
+    only at the repository root left `config/id_rsa` and `app/.env` writable —
+    which is precisely where a real one tends to sit.
     """
     if fnmatch.fnmatch(path, pattern):
+        return True
+    if "/" not in pattern and fnmatch.fnmatch(PurePosixPath(path).name, pattern):
         return True
     collapsed = pattern.replace("/**/", "/")
     if collapsed != pattern and fnmatch.fnmatch(path, collapsed):
