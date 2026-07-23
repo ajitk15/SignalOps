@@ -1082,18 +1082,20 @@ async function resetAgent(id) {
 
 let connectionCache = [];
 
-// Small brand marks for the connector list. Simplified, recognisable, and
-// inline so there is no external request and nothing to fail to load.
+// Small brand marks, inline so there is no external request and nothing to
+// fail to load. Simplified but recognisable: ServiceNow's green mark, Jira's
+// stacked blue chevrons.
 const CONNECTOR_LOGOS = {
   servicenow: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
     <circle cx="16" cy="16" r="15" fill="#62D84E"/>
-    <path d="M16 7.5a8.5 8.5 0 0 0-6.7 13.7 2.2 2.2 0 0 1 .3-2.9 5.9 5.9 0 1 1 8.9 0 2.2 2.2 0 0 1 .3 2.9A8.5 8.5 0 0 0 16 7.5z"
-      fill="#0b1a12"/></svg>`,
+    <path d="M16 7.5a8.5 8.5 0 0 0-6.7 13.7 2.2 2.2 0 0 1 .3-2.9 5.9 5.9 0 1 1 8.9 0 2.2 2.2 0 0 1 .3 2.9A8.5 8.5 0 0 0 16 7.5z" fill="#0b1a12"/></svg>`,
   jira: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
     <path d="M23.5 5H15a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5A4.9 4.9 0 0 0 26.4 16V7.9A2.9 2.9 0 0 0 23.5 5z" fill="#2684FF"/>
     <path d="M19.3 9.3h-8.5a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".8"/>
     <path d="M15.1 13.6H6.6a4.9 4.9 0 0 0 4.9 4.9h1.6V20a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".6"/></svg>`,
 };
+
+const CONNECTOR_LABELS = { servicenow: 'ServiceNow', jira: 'Jira' };
 
 async function renderConnections() {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
@@ -1107,36 +1109,38 @@ async function renderConnections() {
   connectionCache = data.connections;
   const isAdmin = principal.role === 'admin';
   const canTest = principal.role !== 'viewer';
-  const groups = [
-    { kind: 'servicenow', label: 'ServiceNow' },
-    { kind: 'jira', label: 'Jira' },
-  ];
   el('view').innerHTML = `
-    <div class="pipeline-note">
-      A connection is one external instance with one account. Add as many as you need — each
-      workflow names the one it uses. Credentials are <strong>encrypted at rest</strong> and
-      never returned by any screen or endpoint.
+    <div class="conn-bar">
+      <span class="conn-bar-title">Connections</span>
+      <div class="menu-wrap">
+        <button class="button small" onclick="toggleAddMenu(event)" ${isAdmin ? '' : 'disabled'}>
+          Add connection <i class="caret">▾</i></button>
+        <div class="menu hidden" id="add-menu">
+          <button class="menu-item" onclick="openConnectionDialog(null,'servicenow')">
+            ${CONNECTOR_LOGOS.servicenow}<span>ServiceNow</span></button>
+          <button class="menu-item" onclick="openConnectionDialog(null,'jira')">
+            ${CONNECTOR_LOGOS.jira}<span>Jira</span></button>
+        </div>
+      </div>
     </div>
-    ${groups.map(g => {
-      const rows = data.connections.filter(c => c.kind === g.kind);
-      return `
-        <div class="conn-section">
-          <div class="conn-section-head">
-            ${CONNECTOR_LOGOS[g.kind]}
-            <span>${g.label}</span>
-            <span class="conn-count">${rows.length}</span>
-            <button class="button small" onclick="openConnectionDialog(null, '${g.kind}')"
-              ${isAdmin ? '' : 'disabled'}>Add</button>
-          </div>
-          ${rows.length
-            ? `<div class="conn-list">${rows.map(c => connectionRow(c, isAdmin, canTest)).join('')}</div>`
-            : `<div class="conn-empty">No ${g.label} connections yet.</div>`}
-        </div>`;
-    }).join('')}
-    ${data.environment_usable ? `<p class="field-hint">A ServiceNow connection is also
-      configured from environment variables (<code>${esc(data.environment_auth_method)}</code>
-      auth); a workflow with none selected falls back to it.</p>` : ''}`;
+    ${data.connections.length
+      ? `<div class="conn-list">${data.connections.map(c => connectionRow(c, isAdmin, canTest)).join('')}</div>`
+      : `<div class="conn-empty">No connections yet. Use <strong>Add connection</strong> to point a
+         workflow at ServiceNow or Jira.</div>`}
+    ${data.environment_usable ? `<p class="field-hint">A ServiceNow connection is also configured
+      from environment variables (<code>${esc(data.environment_auth_method)}</code> auth); a
+      workflow with none selected falls back to it.</p>` : ''}`;
 }
+
+function toggleAddMenu(event) {
+  event.stopPropagation();
+  const menu = el('add-menu');
+  menu.classList.toggle('hidden');
+  if (!menu.classList.contains('hidden')) {
+    setTimeout(() => document.addEventListener('click', closeAddMenu, { once: true }), 0);
+  }
+}
+function closeAddMenu() { const m = el('add-menu'); if (m) m.classList.add('hidden'); }
 
 function connectionRow(c, isAdmin, canTest) {
   const queue = c.kind === 'jira' ? (c.project_key || c.jql) : c.assignment_group;
@@ -1144,22 +1148,20 @@ function connectionRow(c, isAdmin, canTest) {
   const statusText = c.last_test_ok === true ? 'Connected'
     : c.last_test_ok === false ? 'Failing' : 'Untested';
   return `
-    <div class="conn-row">
+    <div class="conn-row" onclick="openConnectionDialog('${c.id}')">
+      <span class="conn-logo" title="${esc(CONNECTOR_LABELS[c.kind] || c.kind)}">${
+        CONNECTOR_LOGOS[c.kind] || ''}</span>
       <span class="conn-status-dot ${status}" title="${statusText}"></span>
       <div class="conn-main">
         <div class="conn-name">${esc(c.name)}
           ${queue ? `<span class="conn-queue">${esc(queue)}</span>` : ''}</div>
         <div class="conn-sub"><code>${esc(c.base_url)}</code> · ${esc(c.username)}</div>
-        <div class="conn-result" id="conn-result-${c.id}">${
-          c.last_test_detail ? esc(c.last_test_detail) : ''}</div>
       </div>
-      <div class="conn-actions">
-        <button class="icon-button" title="Test connection" onclick="testConnection('${c.id}')"
-          ${canTest ? '' : 'disabled'}>&#8635;</button>
+      <div class="conn-actions" onclick="event.stopPropagation()">
         <button class="icon-button" title="Edit" onclick="openConnectionDialog('${c.id}')"
-          ${isAdmin ? '' : 'disabled'}>&#9998;</button>
+          ${isAdmin ? '' : 'disabled'}><i class="ti">✎</i></button>
         <button class="icon-button danger" title="Delete" onclick="deleteConnection('${c.id}')"
-          ${isAdmin ? '' : 'disabled'}>&#215;</button>
+          ${isAdmin ? '' : 'disabled'}>×</button>
       </div>
     </div>`;
 }
@@ -1222,6 +1224,10 @@ function openServiceNowDialog(c, id, editing) {
       placeholder="priority&lt;=2" />
     <p class="field-hint">A ServiceNow encoded query, combined with the queue above.</p>
 
+    <div class="dialog-test">
+      <button class="button small" onclick="testDraft(${editing ? `'${id}'` : 'null'})">Test connection</button>
+      <span class="dialog-test-result" id="draft-test-result"></span>
+    </div>
     <p class="row-actions">
       <button class="button" onclick="saveConnection(${editing ? `'${id}'` : 'null'})">
         ${editing ? 'Save changes' : 'Create connection'}</button>
@@ -1261,6 +1267,10 @@ function openJiraDialog(c, id, editing) {
       placeholder='project = OPS AND labels = automate' />
     <p class="field-hint">Overrides the project key when set. Any valid JQL.</p>
 
+    <div class="dialog-test">
+      <button class="button small" onclick="testDraft(${editing ? `'${id}'` : 'null'})">Test connection</button>
+      <span class="dialog-test-result" id="draft-test-result"></span>
+    </div>
     <p class="row-actions">
       <button class="button" onclick="saveConnection(${editing ? `'${id}'` : 'null'})">
         ${editing ? 'Save changes' : 'Create connection'}</button>
@@ -1271,30 +1281,39 @@ function toggleOauthFields() {
   el('cn-oauth').classList.toggle('hidden', el('cn-auth').value !== 'oauth');
 }
 
-async function saveConnection(id) {
+function _connectionForm(id) {
   const kind = el('cn-kind').value;
-  const body = kind === 'jira'
-    ? {
-        kind: 'jira',
-        name: el('cn-name').value.trim(),
-        base_url: el('cn-url').value.trim(),
-        username: el('cn-user').value.trim(),
-        api_token: el('cn-token').value || null,
-        project_key: el('cn-project').value.trim(),
-        jql: el('cn-jql').value.trim(),
-      }
-    : {
-        kind: 'servicenow',
-        name: el('cn-name').value.trim(),
-        base_url: el('cn-url').value.trim(),
-        auth_type: el('cn-auth').value,
-        username: el('cn-user').value.trim(),
+  return kind === 'jira'
+    ? { kind: 'jira', name: el('cn-name').value.trim(), base_url: el('cn-url').value.trim(),
+        username: el('cn-user').value.trim(), api_token: el('cn-token').value || null,
+        project_key: el('cn-project').value.trim(), jql: el('cn-jql').value.trim() }
+    : { kind: 'servicenow', name: el('cn-name').value.trim(), base_url: el('cn-url').value.trim(),
+        auth_type: el('cn-auth').value, username: el('cn-user').value.trim(),
         password: el('cn-pass').value || null,
         client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
         client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
-        assignment_group: el('cn-queue').value.trim(),
-        extra_query: el('cn-extra').value.trim(),
-      };
+        assignment_group: el('cn-queue').value.trim(), extra_query: el('cn-extra').value.trim() };
+}
+
+async function testDraft(id) {
+  const out = el('draft-test-result');
+  const body = _connectionForm(id);
+  if (!body.base_url) { out.innerHTML = '<span class="tier-badge bad">failed</span> Enter the URL first.'; return; }
+  out.innerHTML = '<span class="muted">Testing…</span>';
+  const url = '/api/connections/test-draft' + (id ? `?connection_id=${id}` : '');
+  try {
+    const r = await (await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) })).json();
+    out.innerHTML = r.ok
+      ? `<span class="tier-badge ok">connected</span> ${esc(r.detail)}`
+      : `<span class="tier-badge bad">failed</span> ${esc(r.detail)}`;
+  } catch {
+    out.innerHTML = '<span class="tier-badge bad">failed</span> the test could not run';
+  }
+}
+
+async function saveConnection(id) {
+  const body = _connectionForm(id);
   if (!body.name || !body.base_url) return toast('Name and URL are required', false);
   const response = await fetch(id ? `/api/connections/${id}` : '/api/connections', {
     method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },

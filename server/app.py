@@ -903,6 +903,47 @@ async def delete_connection(connection_id: str,
     return {"status": "deleted", "id": connection_id}
 
 
+
+async def _run_connection_test(kind: str, config: dict, secrets: dict) -> tuple:
+    """Test a connection's reachability and credentials. Secrets are plaintext.
+
+    One code path for "test what is stored" and "test what is typed but not yet
+    saved", so the two can never diverge in what counts as a pass.
+    """
+    probe = type("C", (), {"config": config})()
+    try:
+        if kind == "jira":
+            from integrations import jira
+            client = jira.JiraClient(config.get("base_url", "").rstrip("/"),
+                                     config.get("username", ""),
+                                     secrets.get("api_token", ""))
+            await asyncio.to_thread(client.test)
+            detail = "Connected to Jira."
+            if config.get("project_key") or config.get("jql"):
+                issues = await asyncio.to_thread(client.search, jira.project_query(probe), 5)
+                target = config.get("project_key") or "the configured JQL"
+                detail += f" {target} currently matches {len(issues)} issue(s)."
+                return True, detail, len(issues)
+            return True, detail, None
+        oauth = config.get("auth_type") == "oauth"
+        client = servicenow.ServiceNowClient(
+            config.get("base_url", "").rstrip("/"), config.get("username", ""),
+            secrets.get("password", ""),
+            config.get("client_id") if oauth else None,
+            secrets.get("client_secret") if oauth else None)
+        await asyncio.to_thread(client.test)
+        detail = f"Connected using {client.auth_method} authentication."
+        group = config.get("assignment_group")
+        if group:
+            rows = await asyncio.to_thread(
+                client.search_incidents, servicenow.queue_query(probe), 5)
+            detail += f" Queue {group!r} currently matches {len(rows)} active incident(s)."
+            return True, detail, len(rows)
+        return True, detail, None
+    except Exception as error:                          # noqa: BLE001
+        return False, str(error), None
+
+
 @app.post("/api/connections/{connection_id}/test")
 async def test_stored_connection(
         connection_id: str,
@@ -913,38 +954,17 @@ async def test_stored_connection(
     time — a connection that broke overnight should be visible without someone
     thinking to re-test it.
     """
+    from crypto import decrypt
     with session_scope() as session:
         connection = session.get(Connection, connection_id)
         if connection is None or connection.workspace_id != principal.workspace_id:
             raise HTTPException(status_code=404, detail="unknown connection")
-        probe = _DetachedConnection(connection)
+        kind = connection.kind
+        config = dict(connection.config or {})
+        secrets = {name: decrypt(value)
+                   for name, value in (connection.secrets or {}).items()}
 
-    ok, detail, queue_count = True, "", None
-    try:
-        if probe.kind == "jira":
-            from integrations import jira
-            client = jira.client_from(probe)
-            await asyncio.to_thread(client.test)
-            detail = "Connected to Jira."
-            if probe.config.get("project_key") or probe.config.get("jql"):
-                issues = await asyncio.to_thread(
-                    client.search, jira.project_query(probe), 5)
-                queue_count = len(issues)
-                target = probe.config.get("project_key") or "the configured JQL"
-                detail += f" {target} currently matches {queue_count} issue(s)."
-        else:
-            client = servicenow.client_from(probe)
-            await asyncio.to_thread(client.test)
-            detail = f"Connected using {client.auth_method} authentication."
-            group = probe.config.get("assignment_group")
-            if group:
-                rows = await asyncio.to_thread(
-                    client.search_incidents, servicenow.queue_query(probe), 5)
-                queue_count = len(rows)
-                detail += (f" Queue {group!r} currently matches {queue_count} active "
-                           f"incident(s).")
-    except Exception as error:                          # noqa: BLE001
-        ok, detail = False, str(error)
+    ok, detail, queue_count = await _run_connection_test(kind, config, secrets)
 
     with session_scope() as session:
         connection = session.get(Connection, connection_id)
@@ -955,6 +975,42 @@ async def test_stored_connection(
               action="connection_tested", entity_type="connection",
               entity_id=connection_id, workspace_id=principal.workspace_id,
               actor_verified=principal.user.identity_verified, detail={"ok": ok})
+    return {"ok": ok, "detail": detail, "queue_matches": queue_count}
+
+
+@app.post("/api/connections/test-draft")
+async def test_draft_connection(
+        payload: ConnectionRequest, connection_id: str | None = None,
+        principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """Test what the form currently holds, before it is saved.
+
+    A blank secret on an edit means "unchanged", so the stored value is used —
+    the same rule the save path follows, so Test and Save agree on what will run.
+    """
+    from crypto import decrypt
+    if payload.kind == "jira":
+        config = {"base_url": payload.base_url.rstrip("/"), "username": payload.username.strip(),
+                  "project_key": (payload.project_key or "").strip(),
+                  "jql": (payload.jql or "").strip()}
+        secrets = {"api_token": payload.api_token or ""}
+    else:
+        config = {"base_url": payload.base_url.rstrip("/"), "auth_type": payload.auth_type,
+                  "username": payload.username.strip(),
+                  "client_id": (payload.client_id or "").strip(),
+                  "assignment_group": payload.assignment_group.strip(),
+                  "extra_query": payload.extra_query.strip()}
+        secrets = {"password": payload.password or "",
+                   "client_secret": payload.client_secret or ""}
+
+    if connection_id:
+        with session_scope() as session:
+            existing = session.get(Connection, connection_id)
+            if existing is not None and existing.workspace_id == principal.workspace_id:
+                for name, value in (existing.secrets or {}).items():
+                    if not secrets.get(name):
+                        secrets[name] = decrypt(value) or ""
+
+    ok, detail, queue_count = await _run_connection_test(payload.kind, config, secrets)
     return {"ok": ok, "detail": detail, "queue_matches": queue_count}
 
 

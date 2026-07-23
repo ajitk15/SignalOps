@@ -1659,31 +1659,48 @@ button.status-pill:hover {
   .data-table { display: block; overflow-x: auto; white-space: nowrap; }
 }
 
+/* --- connections (compact list + add dropdown + in-dialog test) ----------- */
 
-/* --- connections (compact, with connector logos) -------------------------- */
+.conn-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 0 10px;
+}
+.conn-bar-title { font-size: 14px; font-weight: 600; }
 
-.connector-logo { width: 20px; height: 20px; flex: none; vertical-align: middle; }
+.menu-wrap { position: relative; }
+.caret { font-style: normal; font-size: 11px; opacity: .7; }
 
-.conn-section { margin: 18px 0; }
-
-.conn-section-head {
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 170px;
+  background: var(--panel, #14181f);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 5px;
+  z-index: 30;
+  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+}
+.menu-item {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
-  font-weight: 600;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
 }
-.conn-section-head .conn-count {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--muted);
-  background: color-mix(in srgb, var(--muted) 15%, transparent);
-  border-radius: 999px;
-  padding: 1px 8px;
-}
-.conn-section-head .button.small { margin-left: auto; }
+.menu-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+.connector-logo { width: 18px; height: 18px; flex: none; vertical-align: middle; }
 
 .conn-list {
   display: flex;
@@ -1691,76 +1708,65 @@ button.status-pill:hover {
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
-  margin-top: 10px;
 }
-
 .conn-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 11px 14px;
+  gap: 11px;
+  padding: 9px 12px;
+  cursor: pointer;
 }
 .conn-row + .conn-row { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
-.conn-row:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.conn-row:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 
-.conn-status-dot {
-  width: 9px; height: 9px; border-radius: 50%; flex: none;
-}
+.conn-logo { display: inline-flex; flex: none; }
+.conn-logo .connector-logo { width: 20px; height: 20px; }
+
+.conn-status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .conn-status-dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
 .conn-status-dot.off { background: var(--danger, #ff6b6b); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger, #ff6b6b) 20%, transparent); }
 .conn-status-dot.unknown { background: var(--muted); }
 
 .conn-main { flex: 1; min-width: 0; }
-.conn-name {
-  font-size: 13px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.conn-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .conn-queue {
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: .03em;
+  font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: .03em;
   color: var(--warn);
   border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
-  border-radius: 999px;
-  padding: 1px 7px;
+  border-radius: 999px; padding: 1px 7px;
 }
 .conn-sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 11px; color: var(--muted); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .conn-sub code { font-size: 11px; }
-.conn-result { font-size: 11px; color: var(--muted); margin-top: 3px; }
-.conn-result:empty { display: none; }
 
 .conn-actions { display: flex; gap: 4px; flex: none; }
-
 .icon-button {
-  width: 28px; height: 28px;
+  width: 26px; height: 26px;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 15px;
-  line-height: 1;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1;
   transition: background .12s, color .12s, border-color .12s;
 }
 .icon-button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text, #e6e6e6); }
 .icon-button.danger:hover:not(:disabled) { color: var(--danger, #ff6b6b); border-color: color-mix(in srgb, var(--danger, #ff6b6b) 45%, transparent); }
 .icon-button:disabled { opacity: .35; cursor: default; }
 
-.conn-empty {
-  font-size: 12px;
-  color: var(--muted);
-  padding: 12px 2px;
+.conn-empty { font-size: 13px; color: var(--muted); padding: 18px 4px; }
+
+.button.small { padding: 4px 12px; font-size: 12px; }
+
+/* The Test row inside the add/edit dialog. */
+.dialog-test {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
 }
+.dialog-test-result { font-size: 12px; color: var(--muted); }
