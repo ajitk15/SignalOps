@@ -1103,11 +1103,20 @@ async function decide(approvalId, approved, node) {
 let agentCache = [];
 let agentsTab = 'incident_remediation';
 
+let customAgents = [];
+let grantableTools = [];
+let canAuthorAgents = false;
+let canApproveAgents = false;
+
 async function renderAgents(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading agents…</div>';
   try {
     const data = await (await fetch('/api/agents')).json();
     agentCache = data.agents;
+    customAgents = data.custom_agents || [];
+    grantableTools = data.grantable_tools || [];
+    canAuthorAgents = !!data.can_author;
+    canApproveAgents = !!data.can_approve;
   } catch {
     el('view').innerHTML = '<div class="empty">Agents could not be loaded.</div>';
     return;
@@ -1118,26 +1127,39 @@ async function renderAgents(token = viewToken) {
     { id: 'incident_remediation', label: 'Incident remediation' },
     { id: 'ticket_to_pr', label: 'Ticket → PR' },
   ];
-  // An agent tagged "both" (triage) belongs to every workflow, so it appears
-  // under each tab rather than in a separate bucket nobody would look in.
   const inTab = (a, t) => a.workflow === t || a.workflow === 'both';
   if (!tabs.some(t => t.id === agentsTab)) agentsTab = tabs[0].id;
-  const shown = agentCache.filter(a => inTab(a, agentsTab));
+  const builtins = agentCache.filter(a => inTab(a, agentsTab));
+  // Approved custom agents run alongside the built-ins, so they sit in the same
+  // grid under the tab they belong to. Pending and rejected ones go to a review
+  // panel — they exist but cannot run yet.
+  const approvedCustom = customAgents.filter(c => c.status === 'approved' && inTab(c, agentsTab));
+  const pending = customAgents.filter(c => c.status === 'pending_review');
+  const rejected = customAgents.filter(c => c.status === 'rejected');
 
   el('view').innerHTML = `
     <div class="pipeline-note">
-      Every agent that can run is listed here — the catalogue is the source of truth, not a
-      summary of it. Change the model, rewrite the prompt, set thresholds, enable or disable.
-      <strong>Tools and access tier are defined in code</strong> and stay fixed:
-      customisation changes how an agent judges, never what it can reach.
+      Every agent that can run is listed here — the catalogue is the source of truth.
+      Change the model, rewrite the prompt, set thresholds, enable or disable. The seven
+      built-in agents have <strong>tools and tier fixed in code</strong>. You can also
+      <strong>author your own</strong> — those pick from a grantable tool set (never a shell),
+      their tier is derived, and a non-admin's agent runs only after an admin approves it.
     </div>
     ${canEdit ? '' : `<div class="pipeline-note" style="border-color:var(--warn)">
-      <strong>You are acting as ${esc(principal.role)}, so editing is read-only.</strong>
-      Agent configuration is an admin action.</div>`}
+      <strong>You are acting as ${esc(principal.role)}.</strong> You can propose an agent;
+      an admin approves it before it runs. Editing built-in agents is an admin action.</div>`}
+
+    ${pending.length ? `<div class="review-panel">
+      <div class="review-head">${pending.length} agent${pending.length > 1 ? 's' : ''}
+        awaiting review${canApproveAgents ? '' : ' (an admin decides)'}</div>
+      ${pending.map(c => customAgentCard(c, true)).join('')}
+    </div>` : ''}
+
     <div class="agent-tabbar">
       <div class="agent-tabs" role="tablist" aria-label="Agents by workflow">
         ${tabs.map(t => {
-          const count = agentCache.filter(a => inTab(a, t.id)).length;
+          const count = agentCache.filter(a => inTab(a, t.id)).length
+            + customAgents.filter(c => c.status === 'approved' && inTab(c, t.id)).length;
           const on = t.id === agentsTab;
           return `<button class="agent-tab ${on ? 'on' : ''}" role="tab"
             id="agent-tab-${t.id}" aria-controls="agent-panel" aria-selected="${on}"
@@ -1146,13 +1168,156 @@ async function renderAgents(token = viewToken) {
             <span class="agent-tab-count">${count}</span></button>`;
         }).join('')}
       </div>
-      <button class="button ghost small" onclick="exportAllAgents()">Download all (.zip)</button>
+      <div class="row-actions">
+        ${canAuthorAgents ? `<button class="button small" onclick="openCustomAgentDialog()">
+          New agent</button>` : ''}
+        <button class="button ghost small" onclick="exportAllAgents()">Download all (.zip)</button>
+      </div>
     </div>
     <div class="agent-grid" id="agent-panel" role="tabpanel"
       aria-labelledby="agent-tab-${agentsTab}">
-      ${shown.map(agentCard).join('')}
+      ${builtins.map(agentCard).join('')}
+      ${approvedCustom.map(c => customAgentCard(c, false)).join('')}
+    </div>
+    ${rejected.length ? `<div class="review-panel muted">
+      <div class="review-head">Rejected</div>
+      ${rejected.map(c => customAgentCard(c, false)).join('')}
+    </div>` : ''}`;
+}
+
+function customAgentCard(c, inReview) {
+  const mine = c.created_by === principal.id;
+  const canEdit = canApproveAgents || (mine && c.status === 'pending_review');
+  return `
+    <div class="agent-item custom-agent">
+      <div class="agent-top">
+        <h3>${esc(c.name)}</h3>
+        <span class="tier-badge tier-${esc(c.tier)}">${esc(c.tier.replace('_', ' '))}</span>
+        <span class="trigger-badge trigger-event">custom</span>
+        ${c.status === 'approved' ? '<span class="tier-badge ok">approved</span>'
+          : c.status === 'pending_review' ? '<span class="tier-badge warn">pending review</span>'
+          : '<span class="tier-badge bad">rejected</span>'}
+        ${c.enabled ? '' : '<span class="tier-badge">disabled</span>'}
+      </div>
+      <p class="agent-purpose">${esc(c.purpose)}</p>
+      ${c.explanation ? `<p class="agent-explain">${esc(c.explanation)}</p>` : ''}
+      <div class="agent-meta">
+        <span>model <code>${esc(c.model)}</code></span>
+        <span>tools ${(c.tools || []).length
+          ? c.tools.map(t => `<code>${esc(t)}</code>`).join(' ') : '<code>none</code>'}</span>
+        <span>workflow <code>${esc(c.workflow)}</code></span>
+      </div>
+      ${c.review_note ? `<p class="field-hint">Reviewer note: ${esc(c.review_note)}</p>` : ''}
+      <div class="row-actions" style="margin-top:12px">
+        ${inReview && canApproveAgents ? `
+          <button class="button" onclick="reviewCustomAgent('${c.id}', true)">Approve</button>
+          <button class="button ghost" onclick="reviewCustomAgent('${c.id}', false)">Reject</button>` : ''}
+        ${canEdit ? `<button class="button ghost small"
+          onclick="openCustomAgentDialog('${c.id}')">Edit</button>` : ''}
+        <button class="button ghost small" onclick="exportCustomAgent('${c.id}')">Download</button>
+        ${canApproveAgents ? `<button class="button ghost small"
+          onclick="deleteCustomAgent('${c.id}')">Delete</button>` : ''}
+      </div>
     </div>`;
 }
+
+function openCustomAgentDialog(id) {
+  const c = id ? customAgents.find(x => x.id === id) || {} : {};
+  const editing = Boolean(id);
+  const selected = new Set(c.tools || []);
+  showDialog(editing ? `Edit ${c.name}` : 'New custom agent', `
+    <p class="dialog-note">All agents are Claude Agent SDK based. Tools are picked from the
+      grantable set below — a shell and the network are never options — and the risk tier is
+      derived from what you select. ${canApproveAgents ? 'As an admin, your agent is approved on save.'
+        : 'Your agent is submitted for an admin to approve before it can run.'}</p>
+
+    <label for="ca-name">Name</label>
+    <input id="ca-name" class="draft-field" value="${esc(c.name || '')}" placeholder="e.g. Log summariser" />
+
+    <label for="ca-purpose">Purpose (one line)</label>
+    <input id="ca-purpose" class="draft-field" value="${esc(c.purpose || '')}"
+      placeholder="What this agent decides, in a sentence." />
+
+    <label for="ca-explanation">Explanation (optional)</label>
+    <textarea id="ca-explanation" class="draft-field" rows="2"
+      placeholder="When it runs and what it uses.">${esc(c.explanation || '')}</textarea>
+
+    <label for="ca-workflow">Workflow</label>
+    <select id="ca-workflow" class="draft-field">
+      ${[['incident_remediation','Incident remediation'],['ticket_to_pr','Ticket → PR'],['both','Both']]
+        .map(([v,l]) => `<option value="${v}" ${c.workflow === v ? 'selected' : ''}>${l}</option>`).join('')}
+    </select>
+
+    <label for="ca-model">Model</label>
+    <select id="ca-model" class="draft-field">
+      ${['claude-haiku-4-5','claude-sonnet-5','claude-opus-4-8']
+        .map(m => `<option ${c.model === m ? 'selected' : ''}>${m}</option>`).join('')}
+    </select>
+
+    <label>Tools <span class="field-hint">tier is derived from these</span></label>
+    <div class="tool-checklist">
+      ${grantableTools.map(t => `<label class="tool-check">
+        <input type="checkbox" value="${esc(t.name)}" ${selected.has(t.name) ? 'checked' : ''} />
+        <code>${esc(t.name)}</code><span class="tool-tier">${esc(t.tier.replace('_',' '))}</span>
+      </label>`).join('')}
+    </div>
+
+    <label for="ca-prompt">Instructions (system prompt)</label>
+    <textarea id="ca-prompt" class="draft-editor" style="min-height:130px"
+      placeholder="What the agent should do. The platform's safety rules are prepended automatically.">${esc(c.system_prompt || '')}</textarea>
+
+    <p class="row-actions">
+      <button class="button" onclick="saveCustomAgent(${editing ? `'${id}'` : 'null'})">
+        ${editing ? 'Save' : (canApproveAgents ? 'Create' : 'Submit for review')}</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
+async function saveCustomAgent(id) {
+  const tools = [...document.querySelectorAll('.tool-checklist input:checked')].map(i => i.value);
+  const body = {
+    name: el('ca-name').value.trim(),
+    purpose: el('ca-purpose').value.trim(),
+    explanation: el('ca-explanation').value.trim(),
+    workflow: el('ca-workflow').value,
+    model: el('ca-model').value,
+    system_prompt: el('ca-prompt').value.trim(),
+    tools,
+  };
+  if (!body.name || body.purpose.length < 8 || body.system_prompt.length < 20) {
+    return toast('Name, a one-line purpose, and real instructions are all required', false);
+  }
+  const response = await fetch(id ? `/api/agents/custom/${id}` : '/api/agents/custom', {
+    method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not save', false);
+  closeDialog();
+  toast(id ? 'Agent saved' : (canApproveAgents ? 'Agent created' : 'Submitted for review'));
+  renderAgents();
+}
+
+async function reviewCustomAgent(id, approved) {
+  const note = approved ? (window.prompt('Note (optional)') ?? '')
+    : (window.prompt('Why are you rejecting it?') ?? '');
+  const response = await fetch(`/api/agents/custom/${id}/review`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approved, note: note || null }),
+  });
+  if (!response.ok) return toast((await response.json()).detail || 'could not record', false);
+  toast(approved ? 'Agent approved' : 'Agent rejected');
+  renderAgents();
+}
+
+async function deleteCustomAgent(id) {
+  const c = customAgents.find(x => x.id === id);
+  if (!window.confirm(`Delete the custom agent "${c ? c.name : id}"?`)) return;
+  const response = await fetch(`/api/agents/custom/${id}`, { method: 'DELETE' });
+  if (!response.ok) return toast((await response.json()).detail || 'could not delete', false);
+  toast('Agent deleted');
+  renderAgents();
+}
+
+function exportCustomAgent(id) { window.location = `/api/agents/custom/${id}/export`; }
 
 async function selectAgentsTab(tab, restoreFocus = false) {
   agentsTab = tab;

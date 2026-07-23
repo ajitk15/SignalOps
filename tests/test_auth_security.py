@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import auth  # noqa: E402
+from server.app import UserRequest  # noqa: E402
 from auth import (PasswordAuthProvider, hash_password, normalise_email,  # noqa: E402
                   valid_email)
 
@@ -31,8 +32,6 @@ class EmailValidationTests(unittest.TestCase):
 
     def test_the_user_request_model_rejects_a_bad_email(self):
         from pydantic import ValidationError
-
-        from server.app import UserRequest
         with self.assertRaises(ValidationError):
             UserRequest(email="not-an-email", display_name="A", password="x" * 12)
         with self.assertRaises(ValidationError):
@@ -40,13 +39,10 @@ class EmailValidationTests(unittest.TestCase):
 
     def test_the_user_request_model_rejects_a_blank_name(self):
         from pydantic import ValidationError
-
-        from server.app import UserRequest
         with self.assertRaises(ValidationError):
             UserRequest(email="a@b.com", display_name="   ", password="x" * 12)
 
     def test_a_valid_request_is_normalised(self):
-        from server.app import UserRequest
         req = UserRequest(email="  Ada@Example.COM ", display_name="  Ada  ",
                           password="a-long-password")
         self.assertEqual(req.email, "ada@example.com")

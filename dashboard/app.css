@@ -2210,3 +2210,34 @@ select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible,
   .agent-tab { min-height: 46px; gap: 7px; padding: 8px 10px; font-size: 13px; }
   .agent-tab-count { min-width: 28px; min-height: 23px; padding: 1px 7px; font-size: 12px; }
 }
+
+/* --- custom agents (author + review) -------------------------------------- */
+.review-panel {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  border-radius: 12px; padding: 12px 14px; margin: 14px 0;
+}
+.review-panel.muted {
+  border-color: var(--border); background: transparent; opacity: .8;
+}
+.review-head {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px;
+}
+.custom-agent { border-style: dashed; }
+
+.tool-checklist {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px; margin: 6px 0 4px;
+}
+.tool-check {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  cursor: pointer; font-size: 13px;
+}
+.tool-check input { margin: 0; }
+.tool-check code { font-size: 12px; }
+.tool-tier {
+  margin-left: auto; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .03em; color: var(--muted);
+}

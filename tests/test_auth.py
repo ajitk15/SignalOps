@@ -28,10 +28,18 @@ def _fresh_db(case: unittest.TestCase) -> None:
     engine = create_engine(f"sqlite:///{Path(temp.name) / 'test.db'}", future=True,
                            connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    original_engine = db_module.engine
+    original_sessionlocal = db_module.SessionLocal
     db_module.engine = engine
     db_module.SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def _restore():
+        db_module.engine = original_engine
+        db_module.SessionLocal = original_sessionlocal
+
     case.addCleanup(temp.cleanup)
     case.addCleanup(engine.dispose)   # runs first: cleanups pop in reverse
+    case.addCleanup(_restore)         # restore globals before disposing our temp   # runs first: cleanups pop in reverse
 
 
 class RoleModelTests(unittest.TestCase):

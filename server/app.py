@@ -30,6 +30,7 @@ import time  # noqa: E402
 from agents import export as agent_export  # noqa: E402
 from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
 from agents.catalogue import get as catalogue_get  # noqa: E402
+from agents import custom as custom_agents  # noqa: E402
 from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
 from auth import (COOKIE_SECURE, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS,  # noqa: E402
                   AdminNotConfigured, InvalidCredentials, normalise_email, valid_email,
@@ -46,7 +47,8 @@ from engine.state import Halted  # noqa: E402
 from integrations import servicenow  # noqa: E402
 from events import Event, bus  # noqa: E402
 from models import (AgentConfig, Approval, ApprovalStatus, Connection,  # noqa: E402
-                    Role, Run, RunStatus, RunStep, User, Workflow, Workspace)
+                    CustomAgent, CustomAgentStatus, Role, Run, RunStatus, RunStep,
+                    User, Workflow, Workspace)
 
 # Which tools sit at each tier — shown in the UI so the envelope is legible.
 TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
@@ -463,8 +465,17 @@ async def list_agents(principal: Principal = Depends(require_role(Role.viewer)))
         for spec in CATALOGUE:
             config = configs.get(spec.id)
             agents.append(_agent_view(spec, config, resolve(spec, config)))
+    with session_scope() as session:
+        customs = [_custom_agent_view(c) for c in session.query(CustomAgent)
+                   .filter(CustomAgent.workspace_id == principal.workspace_id)
+                   .order_by(CustomAgent.created_at.desc()).all()]
     return {"agents": agents, "tiers": {t.value: TOOL_TIERS_BY_TIER.get(t.value, [])
-                                        for t in Tier}}
+                                        for t in Tier},
+            "custom_agents": customs,
+            "grantable_tools": [{"name": name, "tier": custom_agents.SDK_TOOL_TIERS[name].value}
+                                for name in custom_agents.GRANTABLE_TOOLS],
+            "can_author": principal.can(Role.operator),
+            "can_approve": principal.can(Role.admin)}
 
 
 @app.put("/api/agents/{agent_id}")
@@ -570,6 +581,214 @@ async def export_agents(principal: Principal = Depends(require_role(Role.viewer)
     return Response(
         content=archive, media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="signalops-agents.zip"'})
+
+
+
+
+# --- custom agents (user-authored, admin-reviewed) ---------------------------
+
+class CustomAgentRequest(BaseModel):
+    """A proposed agent. Tools are picked from the grantable set; the tier is
+    derived on the server, so neither can be used to widen reach."""
+    name: str = Field(min_length=1, max_length=80)
+    purpose: str = Field(min_length=8, max_length=200)
+    explanation: str = Field(default="", max_length=1000)
+    workflow: str = Field(default="both")
+    model: str
+    system_prompt: str = Field(min_length=20, max_length=8000)
+    tools: list[str] = Field(default_factory=list)
+    output_schema: dict | None = None
+
+
+class CustomReviewRequest(BaseModel):
+    approved: bool
+    note: str | None = Field(default=None, max_length=1000)
+
+
+def _custom_agent_view(row: CustomAgent) -> dict:
+    return {
+        "id": row.id, "name": row.name, "purpose": row.purpose,
+        "explanation": row.explanation, "workflow": row.workflow, "model": row.model,
+        "system_prompt": row.system_prompt, "tools": list(row.tools or ()),
+        "tier": row.tier, "output_schema": row.output_schema,
+        "status": row.status.value, "enabled": row.enabled,
+        "created_by": row.created_by, "created_at": row.created_at,
+        "reviewed_at": row.reviewed_at, "review_note": row.review_note,
+        "custom": True,
+    }
+
+
+@app.get("/api/agents/custom")
+async def list_custom_agents(
+        principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    with session_scope() as session:
+        rows = [_custom_agent_view(c) for c in session.query(CustomAgent)
+                .filter(CustomAgent.workspace_id == principal.workspace_id)
+                .order_by(CustomAgent.created_at.desc()).all()]
+    return {"custom_agents": rows,
+            "grantable_tools": [{"name": name, "tier": custom_agents.SDK_TOOL_TIERS[name].value}
+                                for name in custom_agents.GRANTABLE_TOOLS],
+            "can_approve": principal.can(Role.admin)}
+
+
+@app.post("/api/agents/custom")
+async def create_custom_agent(
+        payload: CustomAgentRequest,
+        principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """Create a custom agent.
+
+    An admin's agent is approved on creation. Anyone else's is submitted for
+    review and cannot run until an admin approves it — the review is the point
+    at which a human confirms the prompt and the granted tools are sane.
+    """
+    try:
+        validated = custom_agents.validate(
+            name=payload.name, purpose=payload.purpose, explanation=payload.explanation,
+            workflow=payload.workflow, model=payload.model,
+            system_prompt=payload.system_prompt, tools=payload.tools,
+            output_schema=payload.output_schema)
+    except (custom_agents.CustomAgentInvalid, GuardrailViolation) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    is_admin = principal.can(Role.admin)
+    with session_scope() as session:
+        clash = (session.query(CustomAgent)
+                 .filter(CustomAgent.workspace_id == principal.workspace_id,
+                         CustomAgent.name == validated.name).first())
+        if clash is not None:
+            raise HTTPException(status_code=409,
+                                detail=f"a custom agent named {validated.name!r} already exists")
+        row = CustomAgent(
+            workspace_id=principal.workspace_id, name=validated.name,
+            purpose=validated.purpose, explanation=validated.explanation,
+            workflow=validated.workflow, model=validated.model,
+            system_prompt=validated.system_prompt, tools=list(validated.tools),
+            tier=validated.tier, output_schema=validated.output_schema,
+            status=(CustomAgentStatus.approved if is_admin
+                    else CustomAgentStatus.pending_review),
+            created_by=principal.user.id,
+            reviewed_by=principal.user.id if is_admin else None,
+            reviewed_at=time.time() if is_admin else None)
+        session.add(row)
+        session.flush()
+        audit(session, actor=principal.user.display_name, action="custom_agent_created",
+              entity_type="custom_agent", entity_id=row.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"name": validated.name, "tier": validated.tier,
+                      "tools": list(validated.tools), "status": row.status.value})
+        view = _custom_agent_view(row)
+    return view
+
+
+@app.put("/api/agents/custom/{agent_id}")
+async def update_custom_agent(
+        agent_id: str, payload: CustomAgentRequest,
+        principal: Principal = Depends(require_role(Role.operator))) -> dict:
+    """Edit a custom agent.
+
+    An admin may edit any; a non-admin may edit only their own while it is still
+    pending review. Any edit re-validates and, for a non-admin, returns it to
+    pending review — a changed prompt has not been approved.
+    """
+    try:
+        validated = custom_agents.validate(
+            name=payload.name, purpose=payload.purpose, explanation=payload.explanation,
+            workflow=payload.workflow, model=payload.model,
+            system_prompt=payload.system_prompt, tools=payload.tools,
+            output_schema=payload.output_schema)
+    except (custom_agents.CustomAgentInvalid, GuardrailViolation) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    is_admin = principal.can(Role.admin)
+    with session_scope() as session:
+        row = session.get(CustomAgent, agent_id)
+        if row is None or row.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown custom agent")
+        if not is_admin and (row.created_by != principal.user.id
+                             or row.status is not CustomAgentStatus.pending_review):
+            raise HTTPException(
+                status_code=403,
+                detail="you can only edit your own agents while they await review")
+        row.name = validated.name
+        row.purpose = validated.purpose
+        row.explanation = validated.explanation
+        row.workflow = validated.workflow
+        row.model = validated.model
+        row.system_prompt = validated.system_prompt
+        row.tools = list(validated.tools)
+        row.tier = validated.tier
+        row.output_schema = validated.output_schema
+        if not is_admin:
+            row.status = CustomAgentStatus.pending_review
+            row.reviewed_by = None
+            row.reviewed_at = None
+        audit(session, actor=principal.user.display_name, action="custom_agent_updated",
+              entity_type="custom_agent", entity_id=agent_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"tier": validated.tier, "tools": list(validated.tools)})
+        view = _custom_agent_view(row)
+    return view
+
+
+@app.post("/api/agents/custom/{agent_id}/review")
+async def review_custom_agent(
+        agent_id: str, payload: CustomReviewRequest,
+        principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    """Approve or reject a proposed agent. Admin only.
+
+    Approval is what lets a non-admin's agent run: until then it exists but is
+    inert. The reviewer's identity and note are recorded.
+    """
+    with session_scope() as session:
+        row = session.get(CustomAgent, agent_id)
+        if row is None or row.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown custom agent")
+        row.status = (CustomAgentStatus.approved if payload.approved
+                      else CustomAgentStatus.rejected)
+        row.reviewed_by = principal.user.id
+        row.reviewed_at = time.time()
+        row.review_note = payload.note
+        audit(session, actor=principal.user.display_name,
+              action="custom_agent_approved" if payload.approved else "custom_agent_rejected",
+              entity_type="custom_agent", entity_id=agent_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"note": payload.note})
+        view = _custom_agent_view(row)
+    return view
+
+
+@app.delete("/api/agents/custom/{agent_id}")
+async def delete_custom_agent(
+        agent_id: str, principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        row = session.get(CustomAgent, agent_id)
+        if row is None or row.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown custom agent")
+        session.delete(row)
+        audit(session, actor=principal.user.display_name, action="custom_agent_deleted",
+              entity_type="custom_agent", entity_id=agent_id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified)
+    return {"status": "deleted", "id": agent_id}
+
+
+@app.get("/api/agents/custom/{agent_id}/export")
+async def export_custom_agent(
+        agent_id: str, principal: Principal = Depends(require_role(Role.viewer))) -> Response:
+    """A custom agent as a Claude subagent definition file."""
+    with session_scope() as session:
+        row = session.get(CustomAgent, agent_id)
+        if row is None or row.workspace_id != principal.workspace_id:
+            raise HTTPException(status_code=404, detail="unknown custom agent")
+        resolved = custom_agents.resolve_row(row)
+        markdown = agent_export.to_markdown(resolved.spec, resolved)
+        filename = agent_export.filename_for(resolved.spec)
+    return Response(
+        content=markdown, media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 # --- workflows ---------------------------------------------------------------

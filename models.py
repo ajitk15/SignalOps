@@ -43,6 +43,19 @@ class RunStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class CustomAgentStatus(str, enum.Enum):
+    """Lifecycle of a user-authored agent.
+
+    An admin's own agent goes straight to `approved`. Anyone else's lands in
+    `pending_review` and cannot run until an admin approves it — the review is
+    where a human confirms the prompt and the granted tools are sane before the
+    agent is ever executed.
+    """
+    pending_review = "pending_review"
+    approved = "approved"
+    rejected = "rejected"
+
+
 class ApprovalStatus(str, enum.Enum):
     pending = "pending"
     approved = "approved"
@@ -221,6 +234,44 @@ class AgentConfig(Base):
 
 
 Index("ix_agent_config_ws_agent", AgentConfig.workspace_id, AgentConfig.agent_id, unique=True)
+
+
+class CustomAgent(Base):
+    """A user-authored agent, reviewed before it can run.
+
+    Unlike the catalogue agents (declared in code), these are created from the
+    UI — but the safety envelope is not thereby handed to the UI. `tools` may
+    only contain Claude Agent SDK tools the platform is willing to grant, and
+    `tier` is *derived* from those tools on the server, never accepted from the
+    client. Tools the platform never grants — a shell, network fetch — cannot be
+    selected at all, so even a fully custom agent cannot escalate past read and
+    write-code.
+    """
+    __tablename__ = "custom_agent"
+    id = Column(String, primary_key=True, default=_uuid)
+    workspace_id = Column(String, ForeignKey("workspace.id"), nullable=False)
+    name = Column(String, nullable=False)
+    purpose = Column(Text, nullable=False)
+    explanation = Column(Text, nullable=False, default="")
+    workflow = Column(String, nullable=False, default="both")
+    model = Column(String, nullable=False)
+    # The task prompt. The safety preamble is prepended in code and is not part
+    # of this, so a rewritten task still runs under the injection defences.
+    system_prompt = Column(Text, nullable=False)
+    tools = Column(JSON, nullable=False, default=list)     # Agent SDK tool names
+    tier = Column(String, nullable=False, default="read")  # derived, never from the client
+    output_schema = Column(JSON, nullable=True)
+    status = Column(Enum(CustomAgentStatus), nullable=False,
+                    default=CustomAgentStatus.pending_review)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_by = Column(String, ForeignKey("user.id"), nullable=True)
+    created_at = Column(Float, nullable=False, default=time.time)
+    reviewed_by = Column(String, ForeignKey("user.id"), nullable=True)
+    reviewed_at = Column(Float, nullable=True)
+    review_note = Column(Text, nullable=True)
+
+
+Index("ix_custom_agent_ws_name", CustomAgent.workspace_id, CustomAgent.name, unique=True)
 
 
 class AuditLog(Base):
