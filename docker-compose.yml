@@ -1,0 +1,43 @@
+# SignalAIOps — production stack.
+#
+#   cp .env.production.example .env    # then fill it in
+#   docker compose up -d --build
+#
+# The `caddy` service is optional but recommended: it terminates HTTPS and is
+# what makes SIGNALOPS_ENV=production safe (the session cookie is Secure and is
+# only sent over HTTPS). To run without it, see docs/deploy-vps.md.
+
+services:
+  app:
+    build: .
+    image: signalaiops:latest
+    restart: unless-stopped
+    env_file: .env
+    # Behind Caddy the app does not need a published port; expose it only to
+    # the compose network. To reach it directly (no proxy), uncomment `ports`.
+    expose:
+      - "8000"
+    # ports:
+    #   - "8000:8000"
+    volumes:
+      # Named volume: the database, the encryption key and run checkpoints
+      # persist across `docker compose up --build`.
+      - signalops-data:/app/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  signalops-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,11 @@
+# Replace signalaiops.example.com with your domain (an A record pointing at the
+# VPS). Caddy fetches and renews a Let's Encrypt certificate automatically, so
+# the app is served over HTTPS with no further configuration.
+#
+# No domain yet? Put your VPS IP here and use the internal CA, or serve the app
+# directly on :8000 without Caddy (see docs/deploy-vps.md) — but then set
+# SIGNALOPS_ENV=local so the session cookie is not marked Secure.
+
+signalaiops.example.com {
+    reverse_proxy app:8000
+}

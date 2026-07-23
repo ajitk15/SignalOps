@@ -1,0 +1,25 @@
+# Keep the build context small and never bake secrets or local state into the
+# image. Note: markdown is NOT excluded blanket-style — engine/standalone/*.md
+# is read at runtime to build the downloadable workflow bundle.
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+node_modules
+
+# Secrets and local state — never in the image. The example is kept.
+.env
+.env.local
+.env.*.local
+data/
+*.db
+*.sqlite
+secret.key
+
+# Dev-only material the runtime never imports.
+tests/
+docs/
+engine/standalone/checkpoints*

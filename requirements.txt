@@ -27,6 +27,12 @@ langgraph-checkpoint-sqlite>=3.0,<4.0
 anthropic>=0.118,<1.0
 claude-agent-sdk>=0.2,<1.0
 
+# Authentication and credential storage. argon2-cffi hashes passwords;
+# cryptography (Fernet) encrypts the connection secrets held in the database.
+# Both are load-bearing at runtime, not optional.
+argon2-cffi>=23.1
+cryptography>=42.0
+
 # git is invoked as a subprocess rather than through a library: the operations
 # needed here are half a dozen porcelain commands, and a subprocess boundary is
 # easier to time out and to keep credentials out of.
