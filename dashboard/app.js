@@ -1085,6 +1085,7 @@ async function decide(approvalId, approved, node) {
 // --- agent catalogue --------------------------------------------------------
 
 let agentCache = [];
+let agentsTab = 'incident_remediation';
 
 async function renderAgents(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading agents…</div>';
@@ -1097,22 +1098,46 @@ async function renderAgents(token = viewToken) {
   }
   if (!viewIsCurrent(token)) return;
   const canEdit = principal.role === 'admin';
+  const tabs = [
+    { id: 'incident_remediation', label: 'Incident remediation' },
+    { id: 'ticket_to_pr', label: 'Ticket → PR' },
+  ];
+  // An agent tagged "both" (triage) belongs to every workflow, so it appears
+  // under each tab rather than in a separate bucket nobody would look in.
+  const inTab = (a, t) => a.workflow === t || a.workflow === 'both';
+  if (!tabs.some(t => t.id === agentsTab)) agentsTab = tabs[0].id;
+  const shown = agentCache.filter(a => inTab(a, agentsTab));
+
   el('view').innerHTML = `
     <div class="pipeline-note">
       Every agent that can run is listed here — the catalogue is the source of truth, not a
-      summary of it. You can change the model, rewrite the prompt, set thresholds and
-      enable or disable each one. <strong>Tools and access tier are defined in code</strong>
-      and stay fixed: customisation changes how an agent judges, never what it can reach.
+      summary of it. Change the model, rewrite the prompt, set thresholds, enable or disable.
+      <strong>Tools and access tier are defined in code</strong> and stay fixed:
+      customisation changes how an agent judges, never what it can reach.
     </div>
     ${canEdit ? '' : `<div class="pipeline-note" style="border-color:var(--warn)">
       <strong>You are acting as ${esc(principal.role)}, so editing is read-only.</strong>
-      Agent configuration is an admin action. Switch your role to <em>admin</em> in the
-      sidebar to edit — the login is a placeholder, so you can change it freely.
-    </div>`}
-    <p><button class="button ghost" onclick="exportAllAgents()">Download all agents (.zip)</button></p>
-    <div class="agent-grid">
-      ${agentCache.map(agentCard).join('')}
+      Agent configuration is an admin action.</div>`}
+    <div class="agent-tabbar">
+      <div class="agent-tabs" role="tablist" aria-label="Agents by workflow">
+        ${tabs.map(t => {
+          const count = agentCache.filter(a => inTab(a, t.id)).length;
+          const on = t.id === agentsTab;
+          return `<button class="agent-tab ${on ? 'on' : ''}" role="tab"
+            aria-selected="${on}" onclick="selectAgentsTab('${t.id}')">${esc(t.label)}
+            <span class="agent-tab-count">${count}</span></button>`;
+        }).join('')}
+      </div>
+      <button class="button ghost small" onclick="exportAllAgents()">Download all (.zip)</button>
+    </div>
+    <div class="agent-grid" role="tabpanel">
+      ${shown.map(agentCard).join('')}
     </div>`;
+}
+
+function selectAgentsTab(tab) {
+  agentsTab = tab;
+  renderAgents();
 }
 
 function exportAllAgents() {

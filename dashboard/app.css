@@ -2158,3 +2158,29 @@ select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible,
 }
 .appr-hash { font-size: 11px; color: var(--muted); font-family: var(--font-mono, monospace); }
 .appr-actions { display: flex; gap: 8px; }
+
+/* --- agents grouped by workflow (tabs) ------------------------------------ */
+.agent-tabbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 14px 0 12px; flex-wrap: wrap;
+}
+.agent-tabs {
+  display: inline-flex; gap: 4px;
+  background: var(--panel-2, rgba(255,255,255,.03));
+  border: 1px solid var(--border); border-radius: 999px; padding: 3px;
+}
+.agent-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 32px; padding: 5px 14px;
+  border: 0; border-radius: 999px; background: transparent;
+  color: var(--muted); font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.agent-tab:hover { color: var(--text); }
+.agent-tab.on { background: var(--accent); color: #fff; }
+.agent-tab-count {
+  font-size: 11px; font-weight: 600;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 999px; padding: 0 7px; min-width: 18px; text-align: center;
+}
+.agent-tab.on .agent-tab-count { background: rgba(255,255,255,.25); }
