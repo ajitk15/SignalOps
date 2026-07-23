@@ -1566,3 +1566,107 @@ button.status-pill:hover {
    Ajit@Example.Com, which looks like a different address. */
 .who-role { text-transform: none; }
 .who-role-label { text-transform: uppercase; }
+
+/* --- data tables (Users, and reusable elsewhere) -------------------------- */
+
+.table-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 10px;
+}
+
+.table-count { font-size: 12px; color: var(--muted); }
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table thead th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  vertical-align: middle;
+}
+
+.data-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.data-table .row-inactive td { opacity: .55; }
+.data-table code { font-size: 12px; }
+.data-table .muted { color: var(--muted); }
+
+.col-status { width: 1%; white-space: nowrap; }
+.col-action { width: 1%; text-align: right; white-space: nowrap; }
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
+}
+.status-dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.status-dot.off { background: var(--muted); }
+
+.role-pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: capitalize;
+  color: var(--muted);
+}
+.role-pill.admin {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.row-flag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.row-flag.bad {
+  color: var(--danger, #ff6b6b);
+  border-color: color-mix(in srgb, var(--danger, #ff6b6b) 45%, transparent);
+}
+
+.button.small { padding: 4px 12px; font-size: 12px; }
+
+/* On narrow screens the table scrolls inside itself rather than the page. */
+@media (max-width: 720px) {
+  .data-table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+
+/* Section heading between connection groups. */
+.conn-group {
+  margin: 20px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.conn-group:first-of-type { margin-top: 8px; }

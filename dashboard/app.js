@@ -1094,43 +1094,58 @@ async function renderConnections() {
   connectionCache = data.connections;
   const isAdmin = principal.role === 'admin';
   const canTest = principal.role !== 'viewer';
+  const servicenow = data.connections.filter(c => c.kind === 'servicenow');
+  const jira = data.connections.filter(c => c.kind === 'jira');
   el('view').innerHTML = `
     <div class="pipeline-note">
-      One connection is one ServiceNow instance with one account. Add as many as you
-      need — a dev instance and a production one are simply two connections, and each
-      workflow names the one it uses. Credentials are <strong>encrypted before they are
-      stored</strong> and no screen or endpoint can read them back.
+      A connection is one external instance with one account — a ServiceNow instance or a
+      Jira site. Add as many as you need; a dev and a production instance are simply two
+      connections, and each workflow names the one it uses. Credentials are
+      <strong>encrypted before they are stored</strong> and no screen or endpoint can read
+      them back.
     </div>
     <div class="row-actions">
-      <button class="button" onclick="openConnectionDialog()" ${isAdmin ? '' : 'disabled'}
-        title="${isAdmin ? 'Add a ServiceNow instance' : 'Adding a connection requires admin'}">
-        Add ServiceNow connection</button>
+      <button class="button" onclick="openConnectionDialog(null, 'servicenow')" ${isAdmin ? '' : 'disabled'}
+        title="${isAdmin ? '' : 'Adding a connection requires admin'}">Add ServiceNow connection</button>
+      <button class="button" onclick="openConnectionDialog(null, 'jira')" ${isAdmin ? '' : 'disabled'}>
+        Add Jira connection</button>
     </div>
-    ${data.connections.length
-      ? data.connections.map(c => connectionCard(c, isAdmin, canTest)).join('')
-      : '<div class="empty">No connections yet. Add one to point a workflow at ServiceNow.</div>'}
-    ${data.environment_usable ? `<div class="pipeline-note">Environment variables are also
-      configured (<code>${esc(data.environment_auth_method)}</code> auth). A workflow with no
-      connection selected falls back to them, so an older setup keeps working.</div>` : ''}`;
+
+    <h3 class="conn-group">ServiceNow</h3>
+    ${servicenow.length
+      ? servicenow.map(c => connectionCard(c, isAdmin, canTest)).join('')
+      : '<div class="empty">No ServiceNow connections yet.</div>'}
+
+    <h3 class="conn-group">Jira</h3>
+    ${jira.length
+      ? jira.map(c => connectionCard(c, isAdmin, canTest)).join('')
+      : '<div class="empty">No Jira connections yet.</div>'}
+
+    ${data.environment_usable ? `<div class="pipeline-note">ServiceNow environment variables
+      are also configured (<code>${esc(data.environment_auth_method)}</code> auth). A workflow
+      with no connection selected falls back to them, so an older setup keeps working.</div>` : ''}`;
 }
 
 function connectionCard(c, isAdmin, canTest) {
   const tested = c.last_tested_at
     ? `${c.last_test_ok ? 'ok' : 'failing'} · ${new Date(c.last_tested_at * 1000).toLocaleString()}`
     : 'never tested';
+  const queue = c.kind === 'jira' ? (c.project_key || c.jql) : c.assignment_group;
+  const queueLabel = c.kind === 'jira' ? 'project' : 'queue';
   return `
     <div class="agent-item">
       <div class="agent-top">
         <strong>${esc(c.name)}</strong>
-        <span class="tier-badge">${esc(c.auth_type)} auth</span>
+        <span class="tier-badge">${c.kind === 'jira' ? 'jira' : esc(c.auth_type) + ' auth'}</span>
         <span class="tier-badge ${c.last_test_ok === true ? 'ok' : c.last_test_ok === false ? 'bad' : ''}">
           ${esc(tested)}</span>
-        ${c.assignment_group ? `<span class="tier-badge warn">queue: ${esc(c.assignment_group)}</span>` : ''}
+        ${queue ? `<span class="tier-badge warn">${queueLabel}: ${esc(queue)}</span>` : ''}
       </div>
       <p class="agent-purpose"><code>${esc(c.base_url)}</code> as <code>${esc(c.username)}</code></p>
-      ${c.assignment_group
-        ? `<p class="field-hint">Polls incidents assigned to <strong>${esc(c.assignment_group)}</strong>.</p>`
-        : '<p class="field-hint">No queue set — this connection will not trigger runs on its own.</p>'}
+      ${queue
+        ? `<p class="field-hint">Triggers on new ${c.kind === 'jira' ? 'issues in' : 'incidents assigned to'}
+           <strong>${esc(queue)}</strong>.</p>`
+        : `<p class="field-hint">No ${queueLabel} set — this connection will not trigger runs on its own.</p>`}
       ${c.last_test_detail ? `<p class="field-hint">${esc(c.last_test_detail)}</p>` : ''}
       <div class="row-actions">
         <button class="button ghost" onclick="testConnection('${c.id}')" ${canTest ? '' : 'disabled'}>
@@ -1144,10 +1159,18 @@ function connectionCard(c, isAdmin, canTest) {
     </div>`;
 }
 
-function openConnectionDialog(id) {
+function openConnectionDialog(id, kind) {
   const c = connectionCache.find(x => x.id === id) || {};
   const editing = Boolean(id);
+  kind = c.kind || kind || 'servicenow';
+  return kind === 'jira'
+    ? openJiraDialog(c, id, editing)
+    : openServiceNowDialog(c, id, editing);
+}
+
+function openServiceNowDialog(c, id, editing) {
   showDialog(editing ? `Edit ${c.name}` : 'Add ServiceNow connection', `
+    <input type="hidden" id="cn-kind" value="servicenow" />
     <label for="cn-name">Connection name</label>
     <input id="cn-name" class="draft-field" value="${esc(c.name || '')}"
       placeholder="e.g. Production, or Dev 385636" />
@@ -1200,24 +1223,74 @@ function openConnectionDialog(id) {
       <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
 }
 
+function openJiraDialog(c, id, editing) {
+  showDialog(editing ? `Edit ${c.name}` : 'Add Jira connection', `
+    <input type="hidden" id="cn-kind" value="jira" />
+    <label for="cn-name">Connection name</label>
+    <input id="cn-name" class="draft-field" value="${esc(c.name || '')}"
+      placeholder="e.g. Engineering Jira" />
+
+    <label for="cn-url">Jira site URL</label>
+    <input id="cn-url" class="draft-field" value="${esc(c.base_url || '')}"
+      placeholder="https://your-company.atlassian.net" />
+
+    <label for="cn-user">Account email</label>
+    <input id="cn-user" class="draft-field" type="email" value="${esc(c.username || '')}"
+      autocomplete="off" placeholder="you@company.com" />
+
+    <label for="cn-token">API token</label>
+    <input id="cn-token" class="draft-field" type="password" autocomplete="new-password"
+      placeholder="${c.secrets_set && c.secrets_set.api_token ? 'unchanged — leave blank to keep it' : ''}" />
+    <p class="field-hint">Jira Cloud authenticates the REST API with your <strong>email and an
+      API token</strong> — not your password. Create one at id.atlassian.com → Security →
+      API tokens.</p>
+
+    <label for="cn-project">Monitored project key</label>
+    <input id="cn-project" class="draft-field" value="${esc(c.project_key || '')}"
+      placeholder="e.g. OPS" />
+    <p class="field-hint">New issues in this project trigger the workflow. Leave empty to
+      start runs by hand.</p>
+
+    <label for="cn-jql">Advanced: full JQL (optional)</label>
+    <input id="cn-jql" class="draft-field" value="${esc(c.jql || '')}"
+      placeholder='project = OPS AND labels = automate' />
+    <p class="field-hint">Overrides the project key when set. Any valid JQL.</p>
+
+    <p class="row-actions">
+      <button class="button" onclick="saveConnection(${editing ? `'${id}'` : 'null'})">
+        ${editing ? 'Save changes' : 'Create connection'}</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
 function toggleOauthFields() {
   el('cn-oauth').classList.toggle('hidden', el('cn-auth').value !== 'oauth');
 }
 
 async function saveConnection(id) {
-  const body = {
-    kind: 'servicenow',
-    name: el('cn-name').value.trim(),
-    base_url: el('cn-url').value.trim(),
-    auth_type: el('cn-auth').value,
-    username: el('cn-user').value.trim(),
-    password: el('cn-pass').value || null,
-    client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
-    client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
-    assignment_group: el('cn-queue').value.trim(),
-    extra_query: el('cn-extra').value.trim(),
-  };
-  if (!body.name || !body.base_url) return toast('Name and instance URL are required', false);
+  const kind = el('cn-kind').value;
+  const body = kind === 'jira'
+    ? {
+        kind: 'jira',
+        name: el('cn-name').value.trim(),
+        base_url: el('cn-url').value.trim(),
+        username: el('cn-user').value.trim(),
+        api_token: el('cn-token').value || null,
+        project_key: el('cn-project').value.trim(),
+        jql: el('cn-jql').value.trim(),
+      }
+    : {
+        kind: 'servicenow',
+        name: el('cn-name').value.trim(),
+        base_url: el('cn-url').value.trim(),
+        auth_type: el('cn-auth').value,
+        username: el('cn-user').value.trim(),
+        password: el('cn-pass').value || null,
+        client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
+        client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
+        assignment_group: el('cn-queue').value.trim(),
+        extra_query: el('cn-extra').value.trim(),
+      };
+  if (!body.name || !body.base_url) return toast('Name and URL are required', false);
   const response = await fetch(id ? `/api/connections/${id}` : '/api/connections', {
     method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -1260,33 +1333,53 @@ async function renderUsers() {
     return;
   }
   const data = await (await fetch('/api/users')).json();
+  const active = data.users.filter(u => u.active).length;
   el('view').innerHTML = `
     <div class="pipeline-note">
       Roles are enforced by the server on every request, not by hiding buttons.
-      <strong>Viewer</strong> reads. <strong>Operator</strong> starts runs.
-      <strong>Approver</strong> decides on human gates. <strong>Admin</strong> manages
-      agents, connections, users and the kill switch.
+      <strong>Viewer</strong> reads · <strong>Operator</strong> starts runs ·
+      <strong>Approver</strong> decides on human gates · <strong>Admin</strong> manages
+      everything.
     </div>
-    <div class="row-actions">
+    <div class="table-head">
+      <span class="table-count">${active} active · ${data.users.length - active} inactive</span>
       <button class="button" onclick="openUserDialog()">Invite user</button>
     </div>
-    ${data.users.map(u => `
-      <div class="agent-item">
-        <div class="agent-top">
-          <strong>${esc(u.display_name)}</strong>
-          <span class="tier-badge ${u.role === 'admin' ? 'warn' : ''}">${esc(u.role)}</span>
-          ${u.active ? '' : '<span class="tier-badge bad">deactivated</span>'}
-          ${u.locked ? '<span class="tier-badge bad">locked</span>' : ''}
-          ${u.must_change_password ? '<span class="tier-badge">must change password</span>' : ''}
-        </div>
-        <p class="agent-purpose"><code>${esc(u.email)}</code>${u.last_login_at
-          ? ` · last signed in ${new Date(u.last_login_at * 1000).toLocaleString()}`
-          : ' · never signed in'}</p>
-        <div class="row-actions">
-          <button class="button ghost" onclick="openUserDialog('${u.id}')">Edit</button>
-        </div>
-      </div>`).join('')}`;
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th class="col-status">Status</th>
+          <th>Name</th><th>Email</th><th>Role</th><th>Last sign-in</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${data.users.map(userRow).join('')}
+      </tbody>
+    </table>`;
   window.__users = data.users;
+}
+
+function userRow(u) {
+  const status = u.active
+    ? `<span class="status-dot on" title="Active"></span>Active`
+    : `<span class="status-dot off" title="Deactivated"></span>Inactive`;
+  const flags = [
+    u.locked ? '<span class="row-flag bad">locked</span>' : '',
+    u.must_change_password ? '<span class="row-flag">must change password</span>' : '',
+  ].join('');
+  const lastLogin = u.last_login_at
+    ? new Date(u.last_login_at * 1000).toLocaleString()
+    : '<span class="muted">never</span>';
+  return `
+    <tr class="${u.active ? '' : 'row-inactive'}">
+      <td class="col-status">${status}</td>
+      <td>${esc(u.display_name)} ${flags}</td>
+      <td><code>${esc(u.email)}</code></td>
+      <td><span class="role-pill ${u.role === 'admin' ? 'admin' : ''}">${esc(u.role)}</span></td>
+      <td class="muted">${lastLogin}</td>
+      <td class="col-action"><button class="button ghost small"
+        onclick="openUserDialog('${u.id}')">Edit</button></td>
+    </tr>`;
 }
 
 function openUserDialog(id) {

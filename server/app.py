@@ -723,6 +723,7 @@ class _DetachedConnection:
 
     def __init__(self, connection) -> None:
         self.name = connection.name
+        self.kind = connection.kind
         self.config = dict(connection.config or {})
         self.secrets = dict(connection.secrets or {})
 
@@ -738,11 +739,13 @@ class ConnectionRequest(BaseModel):
     that manages connections has to be able to hold their credentials. What
     does not change is that no endpoint ever returns them.
     """
-    kind: str = "servicenow"
+    kind: str = Field(default="servicenow", pattern="^(servicenow|jira)$")
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(min_length=1, max_length=300)
+    username: str = Field(default="", max_length=200)
+
+    # ServiceNow
     auth_type: str = Field(default="basic", pattern="^(basic|oauth)$")
-    username: str = Field(default="", max_length=120)
     password: str | None = Field(default=None, max_length=300)
     client_id: str | None = Field(default=None, max_length=200)
     client_secret: str | None = Field(default=None, max_length=300)
@@ -751,6 +754,11 @@ class ConnectionRequest(BaseModel):
     assignment_group: str = Field(default="", max_length=120)
     extra_query: str = Field(default="", max_length=500)
 
+    # Jira: email + API token (not a password), and a project or JQL to watch.
+    api_token: str | None = Field(default=None, max_length=500)
+    project_key: str | None = Field(default=None, max_length=80)
+    jql: str | None = Field(default=None, max_length=500)
+
 
 def _connection_view(connection) -> dict:
     from crypto import present
@@ -758,11 +766,15 @@ def _connection_view(connection) -> dict:
     return {
         "id": connection.id, "kind": connection.kind, "name": connection.name,
         "base_url": config.get("base_url", ""),
-        "auth_type": config.get("auth_type", "basic"),
         "username": config.get("username", ""),
+        # ServiceNow
+        "auth_type": config.get("auth_type", "basic"),
         "client_id": config.get("client_id", ""),
         "assignment_group": config.get("assignment_group", ""),
         "extra_query": config.get("extra_query", ""),
+        # Jira
+        "project_key": config.get("project_key", ""),
+        "jql": config.get("jql", ""),
         "enabled": connection.enabled,
         # Presence only. There is no endpoint that returns a stored secret.
         "secrets_set": present(connection.secrets),
@@ -792,19 +804,29 @@ def _apply_connection(connection, payload: ConnectionRequest) -> None:
     from crypto import encrypt
     connection.name = payload.name
     connection.kind = payload.kind
-    connection.config = {
-        "base_url": payload.base_url.rstrip("/"),
-        "auth_type": payload.auth_type,
-        "username": payload.username.strip(),
-        "client_id": (payload.client_id or "").strip(),
-        "assignment_group": payload.assignment_group.strip(),
-        "extra_query": payload.extra_query.strip(),
-    }
+    if payload.kind == "jira":
+        connection.config = {
+            "base_url": payload.base_url.rstrip("/"),
+            "username": payload.username.strip(),      # the account email
+            "project_key": (payload.project_key or "").strip(),
+            "jql": (payload.jql or "").strip(),
+        }
+        secret_fields = (("api_token", payload.api_token),)
+    else:
+        connection.config = {
+            "base_url": payload.base_url.rstrip("/"),
+            "auth_type": payload.auth_type,
+            "username": payload.username.strip(),
+            "client_id": (payload.client_id or "").strip(),
+            "assignment_group": payload.assignment_group.strip(),
+            "extra_query": payload.extra_query.strip(),
+        }
+        secret_fields = (("password", payload.password),
+                         ("client_secret", payload.client_secret))
     secrets = dict(connection.secrets or {})
     # An omitted secret leaves the stored one alone, so editing a queue name
-    # does not require retyping a password nobody can read back.
-    for field, value in (("password", payload.password),
-                         ("client_secret", payload.client_secret)):
+    # does not require retyping a secret nobody can read back.
+    for field, value in secret_fields:
         if value:
             secrets[field] = encrypt(value)
     connection.secrets = secrets
@@ -899,16 +921,28 @@ async def test_stored_connection(
 
     ok, detail, queue_count = True, "", None
     try:
-        client = servicenow.client_from(probe)
-        await asyncio.to_thread(client.test)
-        detail = f"Connected using {client.auth_method} authentication."
-        group = probe.config.get("assignment_group")
-        if group:
-            rows = await asyncio.to_thread(
-                client.search_incidents, servicenow.queue_query(probe), 5)
-            queue_count = len(rows)
-            detail += (f" Queue {group!r} currently matches {queue_count} active "
-                       f"incident(s).")
+        if probe.kind == "jira":
+            from integrations import jira
+            client = jira.client_from(probe)
+            await asyncio.to_thread(client.test)
+            detail = "Connected to Jira."
+            if probe.config.get("project_key") or probe.config.get("jql"):
+                issues = await asyncio.to_thread(
+                    client.search, jira.project_query(probe), 5)
+                queue_count = len(issues)
+                target = probe.config.get("project_key") or "the configured JQL"
+                detail += f" {target} currently matches {queue_count} issue(s)."
+        else:
+            client = servicenow.client_from(probe)
+            await asyncio.to_thread(client.test)
+            detail = f"Connected using {client.auth_method} authentication."
+            group = probe.config.get("assignment_group")
+            if group:
+                rows = await asyncio.to_thread(
+                    client.search_incidents, servicenow.queue_query(probe), 5)
+                queue_count = len(rows)
+                detail += (f" Queue {group!r} currently matches {queue_count} active "
+                           f"incident(s).")
     except Exception as error:                          # noqa: BLE001
         ok, detail = False, str(error)
 
