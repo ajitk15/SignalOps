@@ -269,6 +269,19 @@ class ServiceNowClient:
             raise ServiceNowError(
                 f"ServiceNow returned {error.response.status_code} for {method} {path}"
             ) from error
+        except (httpx.TimeoutException, httpx.ConnectError) as error:
+            # A timeout or a refused connection to ServiceNow is, far more often
+            # than not, a hibernating developer instance — those stop responding
+            # entirely after a period of inactivity and the credentials have
+            # nothing to do with it. Say so, because "could not reach" sends
+            # people to re-check a password that was never the problem.
+            raise ServiceNowError(
+                "ServiceNow did not respond (the request timed out). The credentials are "
+                "not the issue — the instance is unreachable. If this is a developer "
+                "instance it has most likely gone to sleep; wake it at "
+                "developer.servicenow.com and try again. Otherwise check the instance URL "
+                "and that the host is reachable from here."
+            ) from error
         except httpx.HTTPError as error:
             raise ServiceNowError(f"could not reach ServiceNow: {type(error).__name__}") from error
         return response.json().get("result", [])

@@ -192,6 +192,21 @@ class ErrorMessageTests(unittest.TestCase):
         self.assertIn("multi-factor", servicenow._explain_token_failure(
             Response(401, {"error": "invalid_grant"})))
 
+    def test_a_timeout_blames_reachability_not_the_credential(self):
+        """A dev instance that has gone to sleep times out, and the credentials
+        are never the cause — saying "could not reach" sends people to re-check
+        a password that was fine."""
+        import httpx
+        client = ServiceNowClient("https://dev123.service-now.com", "u", "p")
+        with patch("integrations.servicenow.httpx.request",
+                   side_effect=httpx.ReadTimeout("timed out")):
+            with self.assertRaises(ServiceNowError) as caught:
+                client.test()
+        message = str(caught.exception)
+        self.assertIn("did not respond", message)
+        self.assertIn("developer.servicenow.com", message)
+        self.assertIn("credentials are not the issue", message)
+
     def test_a_non_json_token_failure_still_produces_a_message(self):
         class Broken(Response):
             def json(self):

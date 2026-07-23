@@ -1082,6 +1082,19 @@ async function resetAgent(id) {
 
 let connectionCache = [];
 
+// Small brand marks for the connector list. Simplified, recognisable, and
+// inline so there is no external request and nothing to fail to load.
+const CONNECTOR_LOGOS = {
+  servicenow: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
+    <circle cx="16" cy="16" r="15" fill="#62D84E"/>
+    <path d="M16 7.5a8.5 8.5 0 0 0-6.7 13.7 2.2 2.2 0 0 1 .3-2.9 5.9 5.9 0 1 1 8.9 0 2.2 2.2 0 0 1 .3 2.9A8.5 8.5 0 0 0 16 7.5z"
+      fill="#0b1a12"/></svg>`,
+  jira: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
+    <path d="M23.5 5H15a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5A4.9 4.9 0 0 0 26.4 16V7.9A2.9 2.9 0 0 0 23.5 5z" fill="#2684FF"/>
+    <path d="M19.3 9.3h-8.5a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".8"/>
+    <path d="M15.1 13.6H6.6a4.9 4.9 0 0 0 4.9 4.9h1.6V20a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".6"/></svg>`,
+};
+
 async function renderConnections() {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
   let data;
@@ -1094,68 +1107,60 @@ async function renderConnections() {
   connectionCache = data.connections;
   const isAdmin = principal.role === 'admin';
   const canTest = principal.role !== 'viewer';
-  const servicenow = data.connections.filter(c => c.kind === 'servicenow');
-  const jira = data.connections.filter(c => c.kind === 'jira');
+  const groups = [
+    { kind: 'servicenow', label: 'ServiceNow' },
+    { kind: 'jira', label: 'Jira' },
+  ];
   el('view').innerHTML = `
     <div class="pipeline-note">
-      A connection is one external instance with one account — a ServiceNow instance or a
-      Jira site. Add as many as you need; a dev and a production instance are simply two
-      connections, and each workflow names the one it uses. Credentials are
-      <strong>encrypted before they are stored</strong> and no screen or endpoint can read
-      them back.
+      A connection is one external instance with one account. Add as many as you need — each
+      workflow names the one it uses. Credentials are <strong>encrypted at rest</strong> and
+      never returned by any screen or endpoint.
     </div>
-    <div class="row-actions">
-      <button class="button" onclick="openConnectionDialog(null, 'servicenow')" ${isAdmin ? '' : 'disabled'}
-        title="${isAdmin ? '' : 'Adding a connection requires admin'}">Add ServiceNow connection</button>
-      <button class="button" onclick="openConnectionDialog(null, 'jira')" ${isAdmin ? '' : 'disabled'}>
-        Add Jira connection</button>
-    </div>
-
-    <h3 class="conn-group">ServiceNow</h3>
-    ${servicenow.length
-      ? servicenow.map(c => connectionCard(c, isAdmin, canTest)).join('')
-      : '<div class="empty">No ServiceNow connections yet.</div>'}
-
-    <h3 class="conn-group">Jira</h3>
-    ${jira.length
-      ? jira.map(c => connectionCard(c, isAdmin, canTest)).join('')
-      : '<div class="empty">No Jira connections yet.</div>'}
-
-    ${data.environment_usable ? `<div class="pipeline-note">ServiceNow environment variables
-      are also configured (<code>${esc(data.environment_auth_method)}</code> auth). A workflow
-      with no connection selected falls back to them, so an older setup keeps working.</div>` : ''}`;
+    ${groups.map(g => {
+      const rows = data.connections.filter(c => c.kind === g.kind);
+      return `
+        <div class="conn-section">
+          <div class="conn-section-head">
+            ${CONNECTOR_LOGOS[g.kind]}
+            <span>${g.label}</span>
+            <span class="conn-count">${rows.length}</span>
+            <button class="button small" onclick="openConnectionDialog(null, '${g.kind}')"
+              ${isAdmin ? '' : 'disabled'}>Add</button>
+          </div>
+          ${rows.length
+            ? `<div class="conn-list">${rows.map(c => connectionRow(c, isAdmin, canTest)).join('')}</div>`
+            : `<div class="conn-empty">No ${g.label} connections yet.</div>`}
+        </div>`;
+    }).join('')}
+    ${data.environment_usable ? `<p class="field-hint">A ServiceNow connection is also
+      configured from environment variables (<code>${esc(data.environment_auth_method)}</code>
+      auth); a workflow with none selected falls back to it.</p>` : ''}`;
 }
 
-function connectionCard(c, isAdmin, canTest) {
-  const tested = c.last_tested_at
-    ? `${c.last_test_ok ? 'ok' : 'failing'} · ${new Date(c.last_tested_at * 1000).toLocaleString()}`
-    : 'never tested';
+function connectionRow(c, isAdmin, canTest) {
   const queue = c.kind === 'jira' ? (c.project_key || c.jql) : c.assignment_group;
-  const queueLabel = c.kind === 'jira' ? 'project' : 'queue';
+  const status = c.last_test_ok === true ? 'on' : c.last_test_ok === false ? 'off' : 'unknown';
+  const statusText = c.last_test_ok === true ? 'Connected'
+    : c.last_test_ok === false ? 'Failing' : 'Untested';
   return `
-    <div class="agent-item">
-      <div class="agent-top">
-        <strong>${esc(c.name)}</strong>
-        <span class="tier-badge">${c.kind === 'jira' ? 'jira' : esc(c.auth_type) + ' auth'}</span>
-        <span class="tier-badge ${c.last_test_ok === true ? 'ok' : c.last_test_ok === false ? 'bad' : ''}">
-          ${esc(tested)}</span>
-        ${queue ? `<span class="tier-badge warn">${queueLabel}: ${esc(queue)}</span>` : ''}
+    <div class="conn-row">
+      <span class="conn-status-dot ${status}" title="${statusText}"></span>
+      <div class="conn-main">
+        <div class="conn-name">${esc(c.name)}
+          ${queue ? `<span class="conn-queue">${esc(queue)}</span>` : ''}</div>
+        <div class="conn-sub"><code>${esc(c.base_url)}</code> · ${esc(c.username)}</div>
+        <div class="conn-result" id="conn-result-${c.id}">${
+          c.last_test_detail ? esc(c.last_test_detail) : ''}</div>
       </div>
-      <p class="agent-purpose"><code>${esc(c.base_url)}</code> as <code>${esc(c.username)}</code></p>
-      ${queue
-        ? `<p class="field-hint">Triggers on new ${c.kind === 'jira' ? 'issues in' : 'incidents assigned to'}
-           <strong>${esc(queue)}</strong>.</p>`
-        : `<p class="field-hint">No ${queueLabel} set — this connection will not trigger runs on its own.</p>`}
-      ${c.last_test_detail ? `<p class="field-hint">${esc(c.last_test_detail)}</p>` : ''}
-      <div class="row-actions">
-        <button class="button ghost" onclick="testConnection('${c.id}')" ${canTest ? '' : 'disabled'}>
-          Test connection</button>
-        <button class="button ghost" onclick="openConnectionDialog('${c.id}')" ${isAdmin ? '' : 'disabled'}>
-          Edit</button>
-        <button class="button ghost" onclick="deleteConnection('${c.id}')" ${isAdmin ? '' : 'disabled'}>
-          Delete</button>
+      <div class="conn-actions">
+        <button class="icon-button" title="Test connection" onclick="testConnection('${c.id}')"
+          ${canTest ? '' : 'disabled'}>&#8635;</button>
+        <button class="icon-button" title="Edit" onclick="openConnectionDialog('${c.id}')"
+          ${isAdmin ? '' : 'disabled'}>&#9998;</button>
+        <button class="icon-button danger" title="Delete" onclick="deleteConnection('${c.id}')"
+          ${isAdmin ? '' : 'disabled'}>&#215;</button>
       </div>
-      <p class="field-hint" id="conn-result-${c.id}"></p>
     </div>`;
 }
 
