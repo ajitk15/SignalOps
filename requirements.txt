@@ -30,8 +30,8 @@ claude-agent-sdk>=0.2,<1.0
 # Authentication and credential storage. argon2-cffi hashes passwords;
 # cryptography (Fernet) encrypts the connection secrets held in the database.
 # Both are load-bearing at runtime, not optional.
-argon2-cffi>=23.1
-cryptography>=42.0
+argon2-cffi>=25.1,<26
+cryptography>=46,<47
 
 # git is invoked as a subprocess rather than through a library: the operations
 # needed here are half a dozen porcelain commands, and a subprocess boundary is

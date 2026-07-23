@@ -42,8 +42,8 @@ docker --version && docker compose version
 
 ```bash
 apt install -y git
-git clone https://github.com/ajitk15/SignalOps.git
-cd SignalOps
+git clone https://github.com/ajitk15/SignalAIOps.git
+cd SignalAIOps
 ```
 
 ## 4. Configure
@@ -140,7 +140,7 @@ Then `ufw allow 8000`, `docker compose up -d --build`, and open
 **Update to the latest code**
 
 ```bash
-cd SignalOps
+cd SignalAIOps
 git pull
 docker compose up -d --build
 ```
