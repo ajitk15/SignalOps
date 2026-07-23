@@ -1526,9 +1526,13 @@ function exportAgent(id) {
 
 function agentCard(agent) {
   const canEdit = principal.role === 'admin';
+  const accent = agent.color
+    ? ` has-accent" style="--agent-accent:${esc(agent.color)}`
+    : '';
   return `
-    <div class="agent-item">
+    <div class="agent-item${accent}">
       <div class="agent-top">
+        ${agent.color ? '<span class="agent-dot" aria-hidden="true"></span>' : ''}
         <h3>${esc(agent.name)}</h3>
         <span class="tier-badge tier-${esc(agent.tier)}">${esc(agent.tier.replace('_', ' '))}</span>
         ${agent.advisory_only

@@ -1699,6 +1699,22 @@ button.status-pill:hover {
   padding: 15px 16px;
 }
 
+/* Each built-in agent carries a stable identity colour (from the catalogue) so
+   cards are recognisable at a glance. Purely for recognition — tier and the
+   "drives an action" badge still carry the safety-relevant meaning. */
+.agent-item.has-accent {
+  border-left: 3px solid var(--agent-accent, var(--border));
+}
+
+.agent-dot {
+  flex: none;
+  align-self: center;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--agent-accent, var(--muted));
+}
+
 .agent-top {
   display: flex;
   align-items: baseline;

@@ -848,6 +848,7 @@ def _agent_view(spec, config, resolved) -> dict:
         "optional": spec.optional,
         "disabled_effect": spec.disabled_effect,
         "tags": list(spec.tags),
+        "color": spec.color,
         "default_model": spec.default_model,
         "allowed_models": ALLOWED_MODELS,
         # Effective values after customisation, so the UI shows what will run.

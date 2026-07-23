@@ -75,6 +75,11 @@ class AgentSpec:
     disabled_effect: str = ""
     system_prompt: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
+    # A stable identity colour for the agent, shown as an accent in the UI. It
+    # carries no meaning beyond recognition — tier and workflow remain the
+    # safety-relevant facts — so it lives here purely as UI documentation,
+    # alongside output_schema, rather than anywhere it could gate behaviour.
+    color: str = ""
 
 
 CATALOGUE: tuple[AgentSpec, ...] = (
@@ -107,6 +112,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "Every polled ticket is treated as in scope, so the expensive agents run "
             "on tickets they may not be able to help with."),
         tags=("classification", "cheap"),
+        color="#6366f1",  # indigo
     ),
     AgentSpec(
         id="diagnostician",
@@ -138,6 +144,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         disabled_effect=(
             "Incident remediation cannot run: there is no diagnosis to plan from."),
         tags=("reasoning",),
+        color="#8b5cf6",  # violet
     ),
     AgentSpec(
         id="remediation_planner",
@@ -169,6 +176,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "Incident remediation cannot run: the workflow would have nothing to "
             "propose to a human."),
         tags=("planning",),
+        color="#14b8a6",  # teal
     ),
     AgentSpec(
         id="code_locator",
@@ -194,6 +202,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         disabled_effect=(
             "Ticket to PR cannot run: nothing identifies which files to work on."),
         tags=("code", "cheap"),
+        color="#f59e0b",  # amber
     ),
     AgentSpec(
         id="impact_analyst",
@@ -225,6 +234,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "Changes proceed without a complexity or risk assessment, so a human "
             "reviews the diff with less context and no early warning."),
         tags=("code", "reasoning"),
+        color="#06b6d4",  # cyan
     ),
     AgentSpec(
         id="implementer",
@@ -256,6 +266,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
         disabled_effect=(
             "Ticket to PR cannot run: this is the agent that writes the change."),
         tags=("code", "mutating"),
+        color="#f43f5e",  # rose
     ),
     AgentSpec(
         id="qa_reviewer",
@@ -285,6 +296,7 @@ CATALOGUE: tuple[AgentSpec, ...] = (
             "The repository test suite still runs and still blocks the PR; only the "
             "advisory diff review is skipped."),
         tags=("code", "review"),
+        color="#22c55e",  # green
     ),
 )
 
