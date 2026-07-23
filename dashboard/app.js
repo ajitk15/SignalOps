@@ -7,13 +7,14 @@ const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 let principal = null;
-let currentView = 'workflows';
+let currentView = 'home';
 
 // Operate is what you do; Configure is how it behaves. Keeping them apart is
 // the whole point of the sidebar — an on-call user and someone tuning an agent
 // are different people with different urgency.
 const NAV = [
   { group: 'Operate', items: [
+    { id: 'home', label: 'Home', phase: 6 },
     { id: 'workflows', label: 'Workflows', phase: 2 },
     { id: 'runs', label: 'Runs', phase: 2 },
     { id: 'approvals', label: 'Approvals', phase: 2 },
@@ -139,6 +140,7 @@ function renderKillswitch() {
 }
 
 const VIEW_RENDERERS = {
+  home: renderHome,
   audit: renderAudit,
   agents: renderAgents,
   workflows: renderWorkflows,
@@ -537,6 +539,131 @@ async function wizardDoEnable() {
   wizard.active = false;
   toast('Workflow enabled');
   renderWorkflows();
+}
+
+// --- home dashboard ---------------------------------------------------------
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+const RUN_STATUS_LABEL = {
+  succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled',
+  awaiting_approval: 'Awaiting approval', running: 'Running', pending: 'Pending',
+};
+
+async function renderHome() {
+  el('view').innerHTML = '<div class="empty">Loading…</div>';
+  let d;
+  try {
+    d = await (await fetch('/api/overview')).json();
+  } catch {
+    el('view').innerHTML = '<div class="empty">The dashboard could not be loaded.</div>';
+    return;
+  }
+  const c = d.counts;
+
+  // A brand-new workspace gets a genuine welcome and one clear next step
+  // rather than a wall of zeroes.
+  if (d.needs_onboarding && c.workflows_total === 0) {
+    el('view').innerHTML = `
+      <div class="home-welcome">
+        <h2>${greeting()}, ${esc(d.greeting_name)}.</h2>
+        <p>Welcome to SignalOps. It watches a ServiceNow queue, diagnoses the incidents
+          that land there, and proposes fixes for you to approve — nothing acts on its own.</p>
+        <p class="home-steps-label">Two steps to your first workflow:</p>
+        <ol class="home-steps">
+          <li><strong>Connect ServiceNow.</strong> Point it at an instance and a queue.</li>
+          <li><strong>Create a workflow.</strong> Pick a template, review the agents, try it once.</li>
+        </ol>
+        <p class="row-actions">
+          <button class="button" onclick="switchView('connections')">Add a connection</button>
+          <button class="button ghost" onclick="switchView('workflows')">Create a workflow</button>
+        </p>
+        ${d.simulated ? homeSimBanner() : ''}
+      </div>`;
+    return;
+  }
+
+  const tiles = [
+    { label: 'Enabled workflows', value: c.workflows_enabled,
+      sub: `${c.workflows_polling} polling`, view: 'workflows' },
+    { label: 'Pending approvals', value: c.pending_approvals,
+      sub: c.pending_approvals ? 'need a human' : 'all clear',
+      tone: c.pending_approvals ? 'warn' : 'ok', view: 'approvals' },
+    { label: 'Runs today', value: c.runs_today,
+      sub: `${c.runs_total} all time`, view: 'runs' },
+    { label: 'Spend today', value: '$' + (c.spend_today_usd || 0).toFixed(2),
+      sub: c.running ? `${c.running} running now` : 'no active runs', view: 'runs' },
+  ];
+
+  el('view').innerHTML = `
+    <div class="home-head">
+      <h2>${greeting()}, ${esc(d.greeting_name)}.</h2>
+      <span class="home-role">${esc(d.role)}</span>
+    </div>
+    ${d.killswitch ? `<div class="home-alert bad">The workspace kill switch is on — every run
+      is halted. An admin can lift it from the header.</div>` : ''}
+    ${d.simulated ? homeSimBanner() : ''}
+
+    <div class="home-tiles">
+      ${tiles.map(t => `
+        <button class="home-tile" onclick="switchView('${t.view}')">
+          <span class="home-tile-label">${esc(t.label)}</span>
+          <span class="home-tile-value ${t.tone || ''}">${esc(String(t.value))}</span>
+          <span class="home-tile-sub">${esc(t.sub)}</span>
+        </button>`).join('')}
+    </div>
+
+    ${c.pending_approvals ? `<div class="home-callout" onclick="switchView('approvals')">
+      <i class="ti">⚠</i>
+      <span><strong>${c.pending_approvals} approval${c.pending_approvals > 1 ? 's' : ''}</strong>
+        waiting on a human. Review ${c.pending_approvals > 1 ? 'them' : 'it'} →</span>
+    </div>` : ''}
+
+    <div class="home-cols">
+      <div class="home-panel">
+        <div class="home-panel-head">Recent runs
+          <button class="link-button" onclick="switchView('runs')">All runs</button></div>
+        ${d.recent_runs.length ? d.recent_runs.map(homeRunRow).join('')
+          : '<div class="home-panel-empty">No runs yet.</div>'}
+      </div>
+      <div class="home-panel">
+        <div class="home-panel-head">Connections
+          <button class="link-button" onclick="switchView('connections')">Manage</button></div>
+        ${d.connection_health.length ? d.connection_health.map(homeConnRow).join('')
+          : '<div class="home-panel-empty">None configured.</div>'}
+      </div>
+    </div>`;
+}
+
+function homeSimBanner() {
+  return `<div class="home-alert">Running in <strong>simulated mode</strong> — no
+    <code>ANTHROPIC_API_KEY</code> is set, so agent output is placeholder text and every
+    result is labelled simulated. Runs still execute end to end.</div>`;
+}
+
+function homeRunRow(r) {
+  const status = RUN_STATUS_CLASS[r.status] || '';
+  return `
+    <div class="home-run" onclick="showRun('${r.id}')">
+      <span class="home-run-ref">${esc(r.trigger_ref || r.id.slice(0, 8))}</span>
+      <span class="tier-badge ${status}">${esc(RUN_STATUS_LABEL[r.status] || r.status)}</span>
+      <span class="home-run-time">${new Date(r.started_at * 1000).toLocaleTimeString([],
+        { hour: '2-digit', minute: '2-digit' })}</span>
+    </div>`;
+}
+
+function homeConnRow(c) {
+  const dot = c.last_test_ok === true ? 'on' : c.last_test_ok === false ? 'off' : 'unknown';
+  return `
+    <div class="home-conn">
+      <span class="conn-logo">${CONNECTOR_LOGOS[c.kind] || ''}</span>
+      <span class="home-conn-name">${esc(c.name)}</span>
+      <span class="conn-status-dot ${dot}" title="${
+        c.last_test_ok === true ? 'Connected' : c.last_test_ok === false ? 'Failing' : 'Untested'}"></span>
+    </div>`;
 }
 
 // --- workflows --------------------------------------------------------------

@@ -1176,6 +1176,71 @@ async def decide_approval(approval_id: str, payload: DecisionRequest,
     return {"run_id": run_id, "approved": payload.approved}
 
 
+# --- home dashboard ----------------------------------------------------------
+
+@app.get("/api/overview")
+async def overview(principal: Principal = Depends(require_role(Role.viewer))) -> dict:
+    """Everything the home screen shows, in one call.
+
+    One endpoint rather than the home page fanning out to six, because the first
+    thing a landing page must not do is feel slow — and each of these is a
+    cheap count against an indexed, workspace-scoped table.
+    """
+    ws = principal.workspace_id
+    now = time.time()
+    day_ago = now - 86400
+    with session_scope() as session:
+        workflows = session.query(Workflow).filter(Workflow.workspace_id == ws).all()
+        enabled = [w for w in workflows if w.enabled]
+        polling = [w for w in enabled if (w.config or {}).get("poll_enabled")]
+
+        runs = session.query(Run).filter(Run.workspace_id == ws).all()
+        by_status: dict[str, int] = {}
+        for run in runs:
+            by_status[run.status.value] = by_status.get(run.status.value, 0) + 1
+        recent = (session.query(Run).filter(Run.workspace_id == ws)
+                  .order_by(Run.started_at.desc()).limit(6).all())
+        runs_today = [r for r in runs if r.started_at >= day_ago]
+        spend_today = round(sum(r.cost_usd or 0 for r in runs_today), 4)
+
+        pending_approvals = (session.query(Approval).join(Run, Approval.run_id == Run.id)
+                             .filter(Run.workspace_id == ws,
+                                     Approval.status == ApprovalStatus.pending).count())
+        connections = session.query(Connection).filter(Connection.workspace_id == ws).all()
+        connection_health = [
+            {"name": c.name, "kind": c.kind, "last_test_ok": c.last_test_ok}
+            for c in connections]
+        workspace = session.get(Workspace, ws)
+
+        recent_runs = [_run_view(r) for r in recent]
+
+    return {
+        "greeting_name": principal.user.display_name,
+        "role": principal.user.role.value,
+        "identity_verified": principal.user.identity_verified,
+        "simulated": engine().client.simulated,
+        "killswitch": bool(workspace.killswitch) if workspace else False,
+        "counts": {
+            "workflows_total": len(workflows),
+            "workflows_enabled": len(enabled),
+            "workflows_polling": len(polling),
+            "runs_total": len(runs),
+            "runs_today": len(runs_today),
+            "spend_today_usd": spend_today,
+            "pending_approvals": pending_approvals,
+            "awaiting_approval": by_status.get("awaiting_approval", 0),
+            "running": by_status.get("running", 0),
+            "failed": by_status.get("failed", 0),
+            "connections": len(connections),
+        },
+        "runs_by_status": by_status,
+        "connection_health": connection_health,
+        "recent_runs": recent_runs,
+        # A fresh workspace with nothing set up gets pointed at the wizard.
+        "needs_onboarding": len(enabled) == 0,
+    }
+
+
 # --- audit -------------------------------------------------------------------
 
 @app.get("/api/audit")
