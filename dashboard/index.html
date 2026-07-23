@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>SignalAIOps</title>
+  <title>Sign in — SignalAIOps</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark light" />
   <meta id="theme-color" name="theme-color" content="#0b1420" />
@@ -34,30 +34,160 @@
     <button class="theme-toggle login-theme-toggle" type="button" onclick="toggleTheme()"
       data-theme-toggle aria-label="Switch color theme">
       <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
-      <span data-theme-label>Light</span>
     </button>
-    <form class="login-card" id="login-form" onsubmit="doLogin(event)">
-      <h1 class="brand login-brand">
-        <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
-          alt="SignalAIOps" />
-        <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
-          alt="SignalAIOps" />
-      </h1>
+    <div class="login-layout">
+      <section class="login-visual-panel" aria-label="SignalAIOps autonomous incident response">
+        <div class="login-image-surface">
+          <img src="/static/og.png"
+            alt="SignalAIOps turns a detected production signal into an AI diagnosis and a human-approved resolution." />
+          <div class="login-process-motion" aria-hidden="true">
+            <span class="process-route"></span>
+            <i class="process-token"></i>
+            <i class="process-token"></i>
+            <i class="process-token"></i>
+            <span class="process-arrow process-arrow-one"></span>
+            <span class="process-arrow process-arrow-two"></span>
+          </div>
+        </div>
+      </section>
 
-      <div class="login-warning hidden" id="bootstrap-note"></div>
+      <div class="login-form-column">
+        <a class="login-back-link" href="/">
+          <span aria-hidden="true">←</span> Back to product
+        </a>
 
-      <label for="login-email">Email</label>
-      <input id="login-email" class="draft-field" type="email" required autocomplete="username"
-        placeholder="you@company.com" />
+        <form class="login-card" id="login-form" onsubmit="doLogin(event)">
+          <h1 class="brand login-brand">
+            <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+              alt="SignalAIOps" />
+            <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+              alt="SignalAIOps" />
+          </h1>
 
-      <label for="login-password">Password</label>
-      <input id="login-password" class="draft-field" type="password" required
-        autocomplete="current-password" placeholder="Your password" />
-      <p class="dialog-note" id="login-hint"></p>
+          <div class="login-warning hidden" id="bootstrap-note"></div>
 
-      <p><button class="button" type="submit" id="login-submit">Sign in</button></p>
-      <p id="login-status" class="dialog-note" role="alert" aria-live="assertive"></p>
-    </form>
+          <label for="login-email">Email</label>
+          <input id="login-email" class="draft-field" type="email" required autocomplete="username"
+            placeholder="you@company.com" />
+
+          <label for="login-password">Password</label>
+          <input id="login-password" class="draft-field" type="password" required
+            autocomplete="current-password" placeholder="Your password" />
+          <p class="login-inline-action">
+            <a href="#" onclick="showForgotPasswordForm(); return false;">Forgot password?</a>
+          </p>
+          <p class="dialog-note" id="login-hint"></p>
+
+          <div class="login-actions">
+            <button class="button" type="submit" id="login-submit">Sign in</button>
+            <button class="button ghost hidden" type="button" id="request-access-button"
+              onclick="showRegistrationForm()">Request access</button>
+          </div>
+          <p id="login-status" class="dialog-note" role="alert" aria-live="assertive"></p>
+        </form>
+
+        <form class="login-card hidden" id="registration-form"
+          onsubmit="submitAccessRequest(event)">
+          <h1 class="brand login-brand">
+            <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+              alt="SignalAIOps" />
+            <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+              alt="SignalAIOps" />
+          </h1>
+          <h2>Request access</h2>
+          <p class="dialog-note registration-intro">
+            Submit your details for administrator review. This does not create an
+            account, and you cannot sign in until an administrator approves it.
+          </p>
+
+          <label for="registration-name">Name</label>
+          <input id="registration-name" class="draft-field" required maxlength="80"
+            autocomplete="name" placeholder="Your name" />
+
+          <label for="registration-email">Email</label>
+          <input id="registration-email" class="draft-field" type="email" required
+            maxlength="200" autocomplete="email" placeholder="you@company.com" />
+
+          <label for="registration-password">Password</label>
+          <input id="registration-password" class="draft-field" type="password" required
+            maxlength="300" minlength="10" autocomplete="new-password"
+            placeholder="At least 10 characters" />
+
+          <label for="registration-confirm">Confirm password</label>
+          <input id="registration-confirm" class="draft-field" type="password" required
+            maxlength="300" minlength="10" autocomplete="new-password"
+            placeholder="Enter the same password" />
+
+          <p class="row-actions">
+            <button class="button" type="submit" id="registration-submit">Submit request</button>
+            <button class="button ghost" type="button" onclick="showLoginForm()">Back to sign in</button>
+          </p>
+          <p id="registration-status" class="dialog-note" role="status"
+            aria-live="polite"></p>
+        </form>
+
+        <form class="login-card hidden" id="forgot-password-form"
+          onsubmit="submitForgotPassword(event)">
+          <h1 class="brand login-brand">
+            <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+              alt="SignalAIOps" />
+            <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+              alt="SignalAIOps" />
+          </h1>
+          <h2>Reset your password</h2>
+          <p class="dialog-note registration-intro">
+            Enter your account email. If it matches an active account, we will
+            send a secure, one-time reset link.
+          </p>
+          <div class="login-warning hidden" id="password-reset-config-note">
+            Email delivery is not configured for this environment yet. Add the
+            SMTP settings before requesting a reset link.
+          </div>
+
+          <label for="forgot-password-email">Email</label>
+          <input id="forgot-password-email" class="draft-field" type="email" required
+            maxlength="200" autocomplete="email" placeholder="you@company.com" />
+
+          <p class="row-actions">
+            <button class="button" type="submit" id="forgot-password-submit">Send reset link</button>
+            <button class="button ghost" type="button" onclick="showLoginForm()">Back to sign in</button>
+          </p>
+          <p id="forgot-password-status" class="dialog-note" role="status"
+            aria-live="polite"></p>
+        </form>
+
+        <form class="login-card hidden" id="reset-password-form"
+          onsubmit="submitPasswordReset(event)">
+          <h1 class="brand login-brand">
+            <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+              alt="SignalAIOps" />
+            <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+              alt="SignalAIOps" />
+          </h1>
+          <h2>Choose a new password</h2>
+          <p class="dialog-note registration-intro">
+            This secure link works once. Use at least 10 characters for your new password.
+          </p>
+
+          <label for="reset-password-new">New password</label>
+          <input id="reset-password-new" class="draft-field" type="password" required
+            maxlength="300" minlength="10" autocomplete="new-password"
+            placeholder="At least 10 characters" />
+
+          <label for="reset-password-confirm">Confirm password</label>
+          <input id="reset-password-confirm" class="draft-field" type="password" required
+            maxlength="300" minlength="10" autocomplete="new-password"
+            placeholder="Enter the same password" />
+
+          <p class="row-actions">
+            <button class="button" type="submit" id="reset-password-submit">Set new password</button>
+            <button class="button ghost" type="button" onclick="showLoginForm()">Cancel</button>
+          </p>
+          <p id="reset-password-status" class="dialog-note" role="alert"
+            aria-live="assertive"></p>
+        </form>
+      </div>
+    </div>
   </div>
 
   <!-- Application shell. Operate above the line, Configure below it. -->
@@ -100,7 +230,6 @@
           <button class="theme-toggle" type="button" onclick="toggleTheme()"
             data-theme-toggle aria-label="Switch color theme">
             <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
-            <span data-theme-label>Light</span>
           </button>
           <span id="killswitch-pill" class="status-pill hidden"></span>
           <span id="conn" class="conn down">connecting…</span>

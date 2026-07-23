@@ -1,7 +1,0 @@
-# The enterprise path uses these agents only when ENABLE_INCIDENT_AI=true.
-
-agents:
-  diagnostician:
-    model: claude-haiku-4-5      # later: claude-sonnet-5
-  report_writer:
-    model: claude-haiku-4-5      # later: claude-opus-4-8

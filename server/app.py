@@ -6,8 +6,10 @@ and the application shell. Workflows, agents and the engine follow.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -17,9 +19,11 @@ from dotenv import load_dotenv
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from fastapi import Depends, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import (BackgroundTasks, Depends, FastAPI, HTTPException, Response,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -38,6 +42,8 @@ from auth import (COOKIE_SECURE, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS,  # noq
                   ensure_admin, hash_password, issue_session, provider,
                   record_login, require_role, set_password)
 from db import audit, audit_entries, init_db, session_scope  # noqa: E402
+from email_delivery import (password_reset_delivery_available,  # noqa: E402
+                            send_password_reset_email)
 from engine import workflow_export  # noqa: E402
 from engine.approvals import StaleApproval  # noqa: E402
 from engine.runtime import (TEMPLATES, DuplicateRun, EngineError,  # noqa: E402
@@ -47,8 +53,9 @@ from engine.state import Halted  # noqa: E402
 from integrations import servicenow  # noqa: E402
 from events import Event, bus  # noqa: E402
 from models import (AgentConfig, Approval, ApprovalStatus, Connection,  # noqa: E402
-                    CustomAgent, CustomAgentStatus, Role, Run, RunStatus, RunStep,
-                    User, Workflow, Workspace)
+                    CustomAgent, CustomAgentStatus, RegistrationRequest,
+                    RegistrationStatus, PasswordResetToken, Role, Run,
+                    RunStatus, RunStep, User, Workflow, Workspace)
 
 # Which tools sit at each tier — shown in the UI so the envelope is legible.
 TOOL_TIERS_BY_TIER: dict[str, list[str]] = {}
@@ -72,6 +79,8 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 STATIC_FILES = {
     "app.css",
     "app.js",
+    "landing.css",
+    "og.png",
     "signalaiops-favicon-v3.png",
     "signalaiops-logo-dark-v3.png",
     "signalaiops-logo-light-v3.png",
@@ -98,8 +107,8 @@ def _establish_admin() -> None:
             raise RuntimeError(
                 "No administrator exists and none is configured. Set "
                 "SIGNALOPS_ADMIN_EMAIL and SIGNALOPS_ADMIN_PASSWORD in .env, then "
-                "restart. Every other user is created by that administrator from "
-                "the Users screen.")
+                "restart. Other users are created or approved by that administrator "
+                "from the Users screen.")
         logger.warning(
             "SIGNALOPS_ADMIN_EMAIL is not set. Existing accounts still work, but "
             "there is no way to recover admin access if it is lost.")
@@ -114,7 +123,14 @@ _establish_admin()
 async def index() -> FileResponse:
     # no-cache: revalidate every load so a shipped change is never masked by a
     # stale copy.
-    return FileResponse(DASHBOARD_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(DASHBOARD_DIR / "landing.html",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/login")
+async def login_page() -> FileResponse:
+    return FileResponse(DASHBOARD_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/static/{filename}")
@@ -159,17 +175,255 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=300)
 
 
+def _registration_enabled() -> bool:
+    """Return the deploy-time public registration switch.
+
+    It is read for every request rather than frozen at import time so tests and
+    process supervisors can set it consistently. Production should explicitly
+    opt in with ``SIGNALOPS_REGISTRATION_ENABLED=true``.
+    """
+    return os.getenv("SIGNALOPS_REGISTRATION_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 @app.get("/api/auth/state")
 async def auth_state() -> dict:
     """What the login screen needs before anyone has signed in.
 
-    There is no account-creation endpoint here any more. The administrator
-    comes from the environment and everyone else is created by that
-    administrator, so there is nothing unauthenticated to call.
+    Registration creates a pending request only. It never creates an account
+    or grants a role; both remain administrator-only operations.
     """
     return {"provider": provider().name,
             "verifies_identity": provider().verifies_identity,
-            "admin_configured": admin_from_env() is not None}
+            "admin_configured": admin_from_env() is not None,
+            "registration_enabled": _registration_enabled(),
+            "password_reset_email_configured": password_reset_delivery_available()}
+
+
+class AccessRequestPayload(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    display_name: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=300)
+
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str) -> str:
+        if not valid_email(value):
+            raise ValueError("that is not a valid email address")
+        return normalise_email(value)
+
+    @field_validator("display_name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a name is required")
+        return value.strip()
+
+
+ACCESS_REQUEST_RESPONSE = (
+    "If this address is eligible, the request is awaiting administrator approval."
+)
+
+
+@app.post("/api/auth/register", status_code=202)
+async def request_access(payload: AccessRequestPayload) -> dict:
+    """Record an access request without creating an account.
+
+    Every successful submission returns the same response, including when the
+    address already belongs to a user or has a pending request. That prevents
+    this public endpoint from becoming an account-enumeration oracle.
+    """
+    if not _registration_enabled():
+        raise HTTPException(status_code=404, detail="access requests are not enabled")
+    try:
+        password_hash = hash_password(payload.password)
+    except PasswordPolicy as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    with session_scope() as session:
+        existing_user = (session.query(User)
+                         .filter(User.workspace_id == WORKSPACE_ID,
+                                 User.email == payload.email).first())
+        request = (session.query(RegistrationRequest)
+                   .filter(RegistrationRequest.workspace_id == WORKSPACE_ID,
+                           RegistrationRequest.email == payload.email).first())
+
+        if existing_user is None and request is None:
+            request = RegistrationRequest(
+                workspace_id=WORKSPACE_ID,
+                email=payload.email,
+                display_name=payload.display_name,
+                password_hash=password_hash,
+            )
+            try:
+                # A unique index is the final arbiter if two identical public
+                # requests arrive between the lookup and insert. The savepoint
+                # keeps the generic response successful without poisoning the
+                # surrounding transaction.
+                with session.begin_nested():
+                    session.add(request)
+                    session.flush()
+            except IntegrityError:
+                request = None
+            if request is not None:
+                audit(session, actor=payload.email, action="registration_requested",
+                      entity_type="registration_request", entity_id=request.id,
+                      workspace_id=WORKSPACE_ID, actor_verified=False)
+        elif (existing_user is None and request is not None
+              and request.status is RegistrationStatus.rejected):
+            # A rejected applicant may correct their details and ask again.
+            # Pending and approved records are deliberately left untouched so
+            # another person cannot replace an applicant's chosen password.
+            request.display_name = payload.display_name
+            request.password_hash = password_hash
+            request.status = RegistrationStatus.pending
+            request.requested_at = time.time()
+            request.reviewed_at = None
+            request.reviewed_by = None
+            request.review_note = None
+            request.approved_user_id = None
+            request.notify_requested = False
+            request.notification_status = "not_requested"
+            audit(session, actor=payload.email, action="registration_requested",
+                  entity_type="registration_request", entity_id=request.id,
+                  workspace_id=WORKSPACE_ID, actor_verified=False,
+                  detail={"resubmitted": True})
+
+    return {"status": "pending", "message": ACCESS_REQUEST_RESPONSE}
+
+
+PASSWORD_RESET_RESPONSE = (
+    "If an active account exists for that email, a password-reset link will be sent shortly."
+)
+
+
+def _password_reset_ttl_minutes() -> int:
+    try:
+        requested = int(os.getenv("SIGNALOPS_PASSWORD_RESET_TTL_MINUTES", "15"))
+    except ValueError:
+        requested = 15
+    return max(5, min(requested, 60))
+
+
+def _password_reset_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str) -> str:
+        if not valid_email(value):
+            raise ValueError("that is not a valid email address")
+        return normalise_email(value)
+
+
+class PasswordResetCompletion(BaseModel):
+    token: str = Field(min_length=32, max_length=300)
+    new_password: str = Field(min_length=1, max_length=300)
+
+
+@app.post("/api/auth/forgot-password", status_code=202)
+async def forgot_password(payload: ForgotPasswordRequest,
+                          background_tasks: BackgroundTasks) -> dict:
+    """Issue a one-time link without revealing whether the account exists."""
+    email_job: dict | None = None
+    now = time.time()
+    if password_reset_delivery_available():
+        with session_scope() as session:
+            # Keep the table bounded without a separate scheduled job.
+            (session.query(PasswordResetToken)
+             .filter(PasswordResetToken.expires_at < now - (7 * 24 * 3600))
+             .delete(synchronize_session=False))
+            user = (session.query(User)
+                    .filter(User.workspace_id == WORKSPACE_ID,
+                            User.email == payload.email,
+                            User.active.is_(True))
+                    .one_or_none())
+            if user is not None:
+                latest = (session.query(PasswordResetToken)
+                          .filter(PasswordResetToken.user_id == user.id,
+                                  PasswordResetToken.used_at.is_(None))
+                          .order_by(PasswordResetToken.created_at.desc())
+                          .first())
+                # One message per minute per account prevents this public route
+                # from becoming an email-bombing primitive.
+                if latest is None or latest.created_at < now - 60:
+                    raw_token = secrets.token_urlsafe(32)
+                    ttl_minutes = _password_reset_ttl_minutes()
+                    token = PasswordResetToken(
+                        user_id=user.id,
+                        token_hash=_password_reset_digest(raw_token),
+                        created_at=now,
+                        expires_at=now + (ttl_minutes * 60),
+                    )
+                    session.add(token)
+                    session.flush()
+                    audit(session, actor=user.email,
+                          action="password_reset_requested",
+                          entity_type="user", entity_id=user.id,
+                          workspace_id=WORKSPACE_ID, actor_verified=False)
+                    email_job = {
+                        "to_email": user.email,
+                        "display_name": user.display_name,
+                        "token": raw_token,
+                        "ttl_minutes": ttl_minutes,
+                    }
+    if email_job is not None:
+        # The response is identical and can be sent before SMTP work completes,
+        # avoiding an account-enumeration timing difference.
+        background_tasks.add_task(send_password_reset_email, **email_job)
+    return {"message": PASSWORD_RESET_RESPONSE}
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password(payload: PasswordResetCompletion,
+                         response: Response) -> dict:
+    """Consume a one-time email token and revoke every older session."""
+    now = time.time()
+    digest = _password_reset_digest(payload.token)
+    with session_scope() as session:
+        token = (session.query(PasswordResetToken)
+                 .filter(PasswordResetToken.token_hash == digest,
+                         PasswordResetToken.used_at.is_(None),
+                         PasswordResetToken.expires_at > now)
+                 .one_or_none())
+        if token is None:
+            raise HTTPException(
+                status_code=400,
+                detail="This password-reset link is invalid or expired.")
+        claimed = (session.query(PasswordResetToken)
+                   .filter(PasswordResetToken.id == token.id,
+                           PasswordResetToken.used_at.is_(None),
+                           PasswordResetToken.expires_at > now)
+                   .update({"used_at": now}, synchronize_session=False))
+        if claimed != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="This password-reset link is invalid or expired.")
+        user = session.get(User, token.user_id)
+        if user is None or not user.active:
+            raise HTTPException(
+                status_code=400,
+                detail="This password-reset link is invalid or expired.")
+        try:
+            set_password(user, payload.new_password, revoke_sessions=True)
+        except PasswordPolicy as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        # A successful reset retires every outstanding link for the account.
+        (session.query(PasswordResetToken)
+         .filter(PasswordResetToken.user_id == user.id,
+                 PasswordResetToken.used_at.is_(None))
+         .update({"used_at": now}, synchronize_session=False))
+        audit(session, actor=user.email, action="password_reset_completed",
+              entity_type="user", entity_id=user.id,
+              workspace_id=user.workspace_id, actor_verified=True)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"status": "changed",
+            "message": "Your password has been reset. You can now sign in."}
 
 
 @app.post("/api/auth/login")
@@ -291,6 +545,55 @@ def _user_view(user: User) -> dict:
             "last_login_at": user.last_login_at, "created_at": user.created_at}
 
 
+class RegistrationReviewRequest(BaseModel):
+    notify_applicant: bool = False
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("note")
+    @classmethod
+    def _clean_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class RegistrationApprovalRequest(RegistrationReviewRequest):
+    role: Role = Role.viewer
+
+
+def _registration_view(request: RegistrationRequest) -> dict:
+    """Serialize a request without ever exposing its password hash."""
+    return {
+        "id": request.id,
+        "email": request.email,
+        "display_name": request.display_name,
+        "status": request.status.value,
+        "requested_at": request.requested_at,
+        "reviewed_at": request.reviewed_at,
+        "reviewed_by": request.reviewed_by,
+        "review_note": request.review_note,
+        "approved_user_id": request.approved_user_id,
+        "notify_requested": bool(request.notify_requested),
+        "notification_status": request.notification_status,
+    }
+
+
+def _registration_for_admin(session, request_id: str,
+                            principal: Principal) -> RegistrationRequest:
+    request = session.get(RegistrationRequest, request_id)
+    if request is None or request.workspace_id != principal.workspace_id:
+        # Do not reveal a request belonging to a different workspace.
+        raise HTTPException(status_code=404, detail="unknown access request")
+    return request
+
+
+def _record_notification_intent(request: RegistrationRequest, notify: bool) -> None:
+    request.notify_requested = notify
+    # No delivery provider exists yet. This status is intentionally explicit:
+    # selecting Notify must never make the admin believe an email was sent.
+    request.notification_status = "not_configured" if notify else "not_requested"
+
+
 @app.get("/api/users")
 async def list_users(principal: Principal = Depends(require_role(Role.admin))) -> dict:
     with session_scope() as session:
@@ -298,6 +601,104 @@ async def list_users(principal: Principal = Depends(require_role(Role.admin))) -
                 .filter(User.workspace_id == principal.workspace_id)
                 .order_by(User.created_at).all()]
     return {"users": rows, "roles": [r.value for r in Role]}
+
+
+@app.get("/api/registration-requests")
+async def list_registration_requests(
+        principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        requests = (session.query(RegistrationRequest)
+                    .filter(RegistrationRequest.workspace_id == principal.workspace_id)
+                    .order_by(RegistrationRequest.requested_at.desc())
+                    .limit(100).all())
+        # Pending work stays at the top; decided requests remain visible so the
+        # administrator has a lightweight decision history.
+        requests.sort(key=lambda item: item.status is not RegistrationStatus.pending)
+        rows = [_registration_view(request) for request in requests]
+    return {
+        "requests": rows,
+        "roles": [role.value for role in Role],
+        "notifications_available": False,
+    }
+
+
+@app.post("/api/registration-requests/{request_id}/approve")
+async def approve_registration_request(
+        request_id: str, payload: RegistrationApprovalRequest,
+        principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        request = _registration_for_admin(session, request_id, principal)
+        if request.status is not RegistrationStatus.pending:
+            raise HTTPException(status_code=409, detail="this request was already reviewed")
+        existing_user = (session.query(User)
+                         .filter(User.workspace_id == principal.workspace_id,
+                                 User.email == request.email).first())
+        if existing_user is not None:
+            raise HTTPException(status_code=409,
+                                detail="that email already has an account")
+        if not request.password_hash:
+            raise HTTPException(status_code=409,
+                                detail="this request no longer has pending credentials")
+
+        user = User(
+            workspace_id=principal.workspace_id,
+            email=request.email,
+            display_name=request.display_name,
+            role=payload.role,
+            password_hash=request.password_hash,
+            active=True,
+            # This password was chosen by the applicant and never known by the
+            # administrator, so there is no handover credential to replace.
+            must_change_password=False,
+            identity_verified=False,
+        )
+        session.add(user)
+        session.flush()
+        request.status = RegistrationStatus.approved
+        request.reviewed_at = time.time()
+        request.reviewed_by = principal.user.id
+        request.review_note = payload.note
+        request.approved_user_id = user.id
+        request.password_hash = None
+        _record_notification_intent(request, payload.notify_applicant)
+        audit(session, actor=principal.user.display_name,
+              action="registration_approved",
+              entity_type="registration_request", entity_id=request.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"email": request.email, "role": payload.role.value,
+                      "notify_requested": payload.notify_applicant,
+                      "notification_status": request.notification_status})
+        request_view = _registration_view(request)
+        user_view = _user_view(user)
+    return {"request": request_view, "user": user_view}
+
+
+@app.post("/api/registration-requests/{request_id}/reject")
+async def reject_registration_request(
+        request_id: str, payload: RegistrationReviewRequest,
+        principal: Principal = Depends(require_role(Role.admin))) -> dict:
+    with session_scope() as session:
+        request = _registration_for_admin(session, request_id, principal)
+        if request.status is not RegistrationStatus.pending:
+            raise HTTPException(status_code=409, detail="this request was already reviewed")
+        request.status = RegistrationStatus.rejected
+        request.reviewed_at = time.time()
+        request.reviewed_by = principal.user.id
+        request.review_note = payload.note
+        request.approved_user_id = None
+        request.password_hash = None
+        _record_notification_intent(request, payload.notify_applicant)
+        audit(session, actor=principal.user.display_name,
+              action="registration_rejected",
+              entity_type="registration_request", entity_id=request.id,
+              workspace_id=principal.workspace_id,
+              actor_verified=principal.user.identity_verified,
+              detail={"email": request.email,
+                      "notify_requested": payload.notify_applicant,
+                      "notification_status": request.notification_status})
+        view = _registration_view(request)
+    return {"request": view}
 
 
 @app.post("/api/users")
@@ -309,6 +710,13 @@ async def create_user(payload: UserRequest,
                 .filter(User.workspace_id == principal.workspace_id,
                         User.email == email).first()):
             raise HTTPException(status_code=409, detail="that email already has an account")
+        if (session.query(RegistrationRequest)
+                .filter(RegistrationRequest.workspace_id == principal.workspace_id,
+                        RegistrationRequest.email == email,
+                        RegistrationRequest.status == RegistrationStatus.pending).first()):
+            raise HTTPException(
+                status_code=409,
+                detail="that email has a pending access request; approve it instead")
         try:
             hashed = hash_password(payload.password)
         except PasswordPolicy as error:

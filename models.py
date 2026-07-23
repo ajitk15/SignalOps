@@ -34,6 +34,18 @@ class Role(str, enum.Enum):
 ROLE_RANK = {Role.viewer: 0, Role.operator: 1, Role.approver: 2, Role.admin: 3}
 
 
+class RegistrationStatus(str, enum.Enum):
+    """Lifecycle of a public access request.
+
+    Submitting a request is deliberately not account creation. Only an
+    administrator can move it out of ``pending`` and create the corresponding
+    active user.
+    """
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+
 class RunStatus(str, enum.Enum):
     pending = "pending"
     running = "running"
@@ -98,11 +110,68 @@ class User(Base):
     # True once a password has actually been checked. Carried into audit
     # entries so a claimed identity is never displayed as a verified one.
     identity_verified = Column(Boolean, nullable=False, default=False)
+    # Included in signed sessions. Password recovery increments this value so
+    # every previously issued session stops working immediately.
+    session_version = Column(Integer, nullable=True, default=0)
 
     workspace = relationship("Workspace", back_populates="users")
 
 
 Index("ix_user_email", User.workspace_id, User.email, unique=True)
+
+
+class PasswordResetToken(Base):
+    """One-time password recovery proof.
+
+    Only a SHA-256 digest is stored. The random token exists briefly in memory
+    while the email background task is created, then only in the recipient's
+    link.
+    """
+    __tablename__ = "password_reset_token"
+    id = Column(String, primary_key=True, default=_uuid)
+    user_id = Column(String, ForeignKey("user.id"), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    created_at = Column(Float, nullable=False, default=time.time)
+    expires_at = Column(Float, nullable=False)
+    used_at = Column(Float, nullable=True)
+
+
+Index("ix_password_reset_user_created", PasswordResetToken.user_id,
+      PasswordResetToken.created_at)
+
+
+class RegistrationRequest(Base):
+    """A request for an administrator-approved account.
+
+    The applicant's password is hashed before this row is written and is never
+    returned by the API. Keeping the hash here allows the administrator to
+    approve the request without choosing or learning the applicant's password.
+    """
+    __tablename__ = "registration_request"
+    id = Column(String, primary_key=True, default=_uuid)
+    workspace_id = Column(String, ForeignKey("workspace.id"), nullable=False)
+    email = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    # Needed only while pending. Approval transfers it to the new user and
+    # rejection discards it, minimising how long duplicate credential material
+    # exists.
+    password_hash = Column(String, nullable=True)
+    status = Column(Enum(RegistrationStatus), nullable=False,
+                    default=RegistrationStatus.pending)
+    requested_at = Column(Float, nullable=False, default=time.time)
+    reviewed_at = Column(Float, nullable=True)
+    reviewed_by = Column(String, ForeignKey("user.id"), nullable=True)
+    review_note = Column(Text, nullable=True)
+    approved_user_id = Column(String, ForeignKey("user.id"), nullable=True)
+    # Notification delivery is intentionally not implemented until SMTP (or a
+    # mail provider) is configured. Recording intent now makes the admin action
+    # explicit without pretending an email was sent.
+    notify_requested = Column(Boolean, nullable=False, default=False)
+    notification_status = Column(String, nullable=False, default="not_requested")
+
+
+Index("ix_registration_request_email", RegistrationRequest.workspace_id,
+      RegistrationRequest.email, unique=True)
 
 
 class Connection(Base):

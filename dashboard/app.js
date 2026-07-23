@@ -8,6 +8,8 @@ const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
 
 let principal = null;
 let currentView = 'home';
+let passwordResetEmailConfigured = false;
+let passwordResetToken = '';
 
 const THEME_KEY = 'signalaiops-theme';
 
@@ -64,18 +66,190 @@ const VIEW_TITLES = Object.fromEntries(
 // --- authentication ---------------------------------------------------------
 
 async function loadAuthState() {
-  // Nothing here creates an account. The administrator comes from the server's
-  // environment; everyone else is created by that administrator.
   try {
     const state = await (await fetch('/api/auth/state')).json();
     const note = el('bootstrap-note');
     note.classList.toggle('hidden', state.admin_configured);
+    const requestButton = el('request-access-button');
+    if (requestButton) {
+      requestButton.classList.toggle('hidden', !state.registration_enabled);
+    }
+    passwordResetEmailConfigured = Boolean(state.password_reset_email_configured);
+    const resetNote = el('password-reset-config-note');
+    if (resetNote) resetNote.classList.toggle('hidden', passwordResetEmailConfigured);
+    const resetSubmit = el('forgot-password-submit');
+    if (resetSubmit) resetSubmit.disabled = !passwordResetEmailConfigured;
     if (!state.admin_configured) {
       note.innerHTML = '<strong>No administrator is configured.</strong> Set '
         + '<code>SIGNALOPS_ADMIN_EMAIL</code> and <code>SIGNALOPS_ADMIN_PASSWORD</code> '
         + 'where the server runs, then restart.';
     }
   } catch { /* the login form still works without this */ }
+}
+
+const AUTH_FORM_IDS = [
+  'login-form',
+  'registration-form',
+  'forgot-password-form',
+  'reset-password-form',
+];
+
+function showAuthForm(formId) {
+  AUTH_FORM_IDS.forEach(id => {
+    const form = el(id);
+    if (form) form.classList.toggle('hidden', id !== formId);
+  });
+}
+
+function showRegistrationForm() {
+  showAuthForm('registration-form');
+  el('registration-status').textContent = '';
+  el('registration-name').focus();
+}
+
+function showLoginForm() {
+  showAuthForm('login-form');
+  passwordResetToken = '';
+  if (window.location.hash.startsWith('#reset=')) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+  }
+  el('login-email').focus();
+}
+
+function showForgotPasswordForm() {
+  showAuthForm('forgot-password-form');
+  const sourceEmail = el('login-email').value.trim();
+  if (sourceEmail) el('forgot-password-email').value = sourceEmail;
+  el('forgot-password-status').textContent = '';
+  el('forgot-password-email').focus();
+}
+
+function showResetPasswordForm(token) {
+  passwordResetToken = token;
+  showAuthForm('reset-password-form');
+  el('reset-password-status').textContent = '';
+  el('reset-password-new').focus();
+}
+
+function resetTokenFromLocation() {
+  if (!window.location.hash.startsWith('#reset=')) return '';
+  try {
+    return decodeURIComponent(window.location.hash.slice('#reset='.length));
+  } catch {
+    return '';
+  }
+}
+
+async function submitForgotPassword(event) {
+  event.preventDefault();
+  const status = el('forgot-password-status');
+  const submit = el('forgot-password-submit');
+  if (!passwordResetEmailConfigured) {
+    status.textContent = 'Email delivery is not configured for this environment.';
+    status.className = 'dialog-note form-error';
+    return;
+  }
+  submit.disabled = true;
+  submit.setAttribute('aria-busy', 'true');
+  status.textContent = 'Preparing a secure reset link…';
+  status.className = 'dialog-note';
+  try {
+    const response = await fetch('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: el('forgot-password-email').value.trim() }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'could not request a reset link');
+    status.textContent = result.message;
+    status.className = 'dialog-note form-success';
+  } catch (error) {
+    status.textContent = String(error.message);
+    status.className = 'dialog-note form-error';
+  } finally {
+    submit.disabled = !passwordResetEmailConfigured;
+    submit.removeAttribute('aria-busy');
+  }
+}
+
+async function submitPasswordReset(event) {
+  event.preventDefault();
+  const status = el('reset-password-status');
+  const submit = el('reset-password-submit');
+  const password = el('reset-password-new').value;
+  if (!passwordResetToken) {
+    status.textContent = 'This password-reset link is invalid or expired.';
+    status.className = 'dialog-note form-error';
+    return;
+  }
+  if (password !== el('reset-password-confirm').value) {
+    status.textContent = 'The passwords do not match.';
+    status.className = 'dialog-note form-error';
+    return;
+  }
+  submit.disabled = true;
+  submit.setAttribute('aria-busy', 'true');
+  status.textContent = 'Setting your new password…';
+  status.className = 'dialog-note';
+  try {
+    const response = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: passwordResetToken, new_password: password }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'could not reset the password');
+    el('reset-password-new').value = '';
+    el('reset-password-confirm').value = '';
+    showLoginForm();
+    const loginStatus = el('login-status');
+    loginStatus.textContent = result.message;
+    loginStatus.className = 'dialog-note form-success';
+  } catch (error) {
+    status.textContent = String(error.message);
+    status.className = 'dialog-note form-error';
+  } finally {
+    submit.disabled = false;
+    submit.removeAttribute('aria-busy');
+  }
+}
+
+async function submitAccessRequest(event) {
+  event.preventDefault();
+  const status = el('registration-status');
+  const submit = el('registration-submit');
+  const password = el('registration-password').value;
+  if (password !== el('registration-confirm').value) {
+    status.textContent = 'The passwords do not match.';
+    status.className = 'dialog-note form-error';
+    return;
+  }
+  submit.disabled = true;
+  submit.setAttribute('aria-busy', 'true');
+  status.textContent = 'Submitting for administrator review…';
+  status.className = 'dialog-note';
+  try {
+    const response = await fetch('/api/auth/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        display_name: el('registration-name').value.trim(),
+        email: el('registration-email').value.trim(),
+        password,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'could not submit request');
+    el('registration-password').value = '';
+    el('registration-confirm').value = '';
+    status.textContent = `${result.message} You can return to sign in.`;
+    status.className = 'dialog-note form-success';
+  } catch (error) {
+    status.textContent = String(error.message);
+    status.className = 'dialog-note form-error';
+  } finally {
+    submit.disabled = false;
+    submit.removeAttribute('aria-busy');
+  }
 }
 
 async function doLogin(event) {
@@ -111,6 +285,7 @@ async function doLogout() {
   el('app').classList.add('hidden');
   el('login-screen').classList.remove('hidden');
   el('login-status').textContent = '';
+  showLoginForm();
   await loadAuthState();
 }
 
@@ -1974,9 +2149,29 @@ async function renderUsers(token = viewToken) {
       role. You are signed in as <strong>${esc(principal.role)}</strong>.</div>`;
     return;
   }
-  const data = await (await fetch('/api/users')).json();
+  let data;
+  let registrations;
+  try {
+    const [usersResponse, registrationsResponse] = await Promise.all([
+      fetch('/api/users'),
+      fetch('/api/registration-requests'),
+    ]);
+    if (!usersResponse.ok || !registrationsResponse.ok) {
+      throw new Error('could not load user administration');
+    }
+    [data, registrations] = await Promise.all([
+      usersResponse.json(),
+      registrationsResponse.json(),
+    ]);
+  } catch (error) {
+    if (viewIsCurrent(token)) {
+      el('view').innerHTML = `<div class="pipeline-note">${esc(error.message)}</div>`;
+    }
+    return;
+  }
   if (!viewIsCurrent(token)) return;
   const active = data.users.filter(u => u.active).length;
+  const pending = registrations.requests.filter(r => r.status === 'pending').length;
   el('view').innerHTML = `
     <div class="pipeline-note">
       Roles are enforced by the server on every request, not by hiding buttons.
@@ -1984,22 +2179,142 @@ async function renderUsers(token = viewToken) {
       <strong>Approver</strong> decides on human gates · <strong>Admin</strong> manages
       everything.
     </div>
+    <section class="user-admin-section" aria-labelledby="access-requests-title">
+      <div class="table-head">
+        <div>
+          <h2 id="access-requests-title">Access requests</h2>
+          <span class="table-count">${pending} awaiting review</span>
+        </div>
+      </div>
+      ${registrations.requests.length ? `
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Status</th><th>Name</th><th>Email</th><th>Requested</th><th></th>
+              </tr>
+            </thead>
+            <tbody>${registrations.requests.map(registrationRow).join('')}</tbody>
+          </table>
+        </div>` : `
+        <div class="empty request-empty">No access requests yet.</div>`}
+      <p class="field-hint notification-availability">
+        Applicant notification can be requested during approval or rejection.
+        Email delivery is not configured yet, so the decision is recorded but no email is sent.
+      </p>
+    </section>
+    <section class="user-admin-section" aria-labelledby="accounts-title">
     <div class="table-head">
-      <span class="table-count">${active} active · ${data.users.length - active} inactive</span>
+      <div>
+        <h2 id="accounts-title">Accounts</h2>
+        <span class="table-count">${active} active · ${data.users.length - active} inactive</span>
+      </div>
       <button class="button" onclick="openUserDialog()">Invite user</button>
     </div>
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th class="col-status">Status</th>
-          <th>Name</th><th>Email</th><th>Role</th><th>Last sign-in</th><th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${data.users.map(userRow).join('')}
-      </tbody>
-    </table>`;
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th class="col-status">Status</th>
+            <th>Name</th><th>Email</th><th>Role</th><th>Last sign-in</th><th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.users.map(userRow).join('')}
+        </tbody>
+      </table>
+    </div>
+    </section>`;
   window.__users = data.users;
+  window.__registrationRequests = registrations.requests;
+  window.__registrationRoles = registrations.roles;
+}
+
+function registrationRow(request) {
+  const requested = new Date(request.requested_at * 1000).toLocaleString();
+  const status = `<span class="request-status ${esc(request.status)}">
+    ${esc(request.status)}</span>`;
+  const notification = request.notify_requested
+    ? `<span class="row-flag ${request.notification_status === 'not_configured' ? 'bad' : ''}">
+        notify: ${esc(request.notification_status.replace(/_/g, ' '))}</span>`
+    : '';
+  const actions = request.status === 'pending'
+    ? `<button class="button small" onclick="openRegistrationReview('${request.id}', 'approve')">
+         Approve</button>
+       <button class="button ghost small" onclick="openRegistrationReview('${request.id}', 'reject')">
+         Reject</button>`
+    : `<span class="muted">${request.reviewed_at
+        ? new Date(request.reviewed_at * 1000).toLocaleString() : ''}</span>`;
+  return `
+    <tr>
+      <td>${status} ${notification}</td>
+      <td>${esc(request.display_name)}</td>
+      <td><code>${esc(request.email)}</code></td>
+      <td class="muted">${requested}</td>
+      <td class="col-action request-actions">${actions}</td>
+    </tr>`;
+}
+
+function openRegistrationReview(id, action) {
+  const request = (window.__registrationRequests || []).find(item => item.id === id);
+  if (!request || request.status !== 'pending') return;
+  const approving = action === 'approve';
+  showDialog(`${approving ? 'Approve' : 'Reject'} access request`, `
+    <div class="request-review-identity">
+      <strong>${esc(request.display_name)}</strong>
+      <code>${esc(request.email)}</code>
+    </div>
+    ${approving ? `
+      <label for="registration-role">Role</label>
+      <select id="registration-role" class="draft-field">
+        ${(window.__registrationRoles || ROLES).map(role =>
+          `<option value="${esc(role)}">${esc(role)}</option>`).join('')}
+      </select>
+      <p class="field-hint">The applicant requested access, not a role. You assign the
+        least privilege they need.</p>` : `
+      <p class="dialog-note">Rejecting keeps a decision record and creates no account.</p>`}
+    <label for="registration-note">Decision note (optional)</label>
+    <textarea id="registration-note" class="draft-field" rows="3"
+      maxlength="500" placeholder="Reason or onboarding context"></textarea>
+    <div class="field-row">
+      <label class="switch">
+        <input type="checkbox" id="registration-notify" />
+        <span>Notify applicant</span>
+      </label>
+    </div>
+    <p class="field-hint notification-warning">
+      Email delivery is not configured. This records the notification request,
+      but no message will be sent.
+    </p>
+    <p class="row-actions">
+      <button class="button ${approving ? '' : 'danger'}"
+        onclick="submitRegistrationReview('${id}', '${action}')">
+        ${approving ? 'Approve and create account' : 'Reject request'}
+      </button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button>
+    </p>`);
+}
+
+async function submitRegistrationReview(id, action) {
+  const notify = el('registration-notify').checked;
+  const body = {
+    note: el('registration-note').value.trim() || null,
+    notify_applicant: notify,
+  };
+  if (action === 'approve') body.role = el('registration-role').value;
+  const response = await fetch(`/api/registration-requests/${id}/${action}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (!response.ok) return toast(result.detail || 'could not review request', false);
+  closeDialog();
+  const notificationStatus = result.request.notification_status;
+  const decision = action === 'approve' ? 'Account approved and created.' : 'Request rejected.';
+  toast(notify && notificationStatus === 'not_configured'
+    ? `${decision} Email was not sent because delivery is not configured.`
+    : decision);
+  renderUsers();
 }
 
 function userRow(u) {
@@ -2247,4 +2562,6 @@ document.addEventListener('keydown', (event) => {
   } catch { /* fall through to the login gate */ }
   await loadAuthState();
   el('login-screen').classList.remove('hidden');
+  const resetToken = resetTokenFromLocation();
+  if (resetToken) showResetPasswordForm(resetToken);
 })();

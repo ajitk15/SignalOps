@@ -271,15 +271,21 @@ def ensure_admin(session, workspace_id: str) -> User | None:
     return user
 
 
-def set_password(user: User, password: str) -> None:
+def set_password(user: User, password: str, *, revoke_sessions: bool = False) -> None:
     user.password_hash = hash_password(password)
     user.must_change_password = False
     user.failed_logins = 0
     user.locked_until = None
+    if revoke_sessions:
+        user.session_version = int(user.session_version or 0) + 1
 
 
 def issue_session(user: User) -> str:
-    return _serializer.dumps({"uid": user.id, "ws": user.workspace_id})
+    return _serializer.dumps({
+        "uid": user.id,
+        "ws": user.workspace_id,
+        "sv": int(user.session_version or 0),
+    })
 
 
 def _load_session(raw: str | None) -> dict | None:
@@ -326,6 +332,8 @@ def current_principal(signalops_session: str | None = Cookie(default=None)) -> P
         user = session.get(User, data.get("uid"))
         workspace = session.get(Workspace, data.get("ws"))
         if user is None or workspace is None or user.workspace_id != workspace.id:
+            raise HTTPException(status_code=401, detail="session no longer valid")
+        if int(data.get("sv", 0)) != int(user.session_version or 0):
             raise HTTPException(status_code=401, detail="session no longer valid")
         if not user.active:
             # Deactivation has to take effect on the next request, not the next
