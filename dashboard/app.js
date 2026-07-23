@@ -114,22 +114,32 @@ async function doLogout() {
   await loadAuthState();
 }
 
-function openPasswordDialog() {
-  showDialog('Change your password', `
-    <p class="dialog-note">Your current password is required even though you are signed
+function openPasswordDialog(forced = false) {
+  showDialog(forced ? 'Set your password' : 'Change your password', `
+    ${forced ? `<p class="dialog-note"><strong>You are using a password an administrator set
+      for you.</strong> Choose your own before continuing — the rest of the app is locked
+      until you do.</p>`
+      : `<p class="dialog-note">Your current password is required even though you are signed
       in — an unattended browser is the common case, and re-asking is what stops it
-      becoming an account takeover.</p>
-    <label for="pw-current">Current password</label>
+      becoming an account takeover.</p>`}
+    <label for="pw-current">${forced ? 'The password you signed in with' : 'Current password'}</label>
     <input id="pw-current" class="draft-field" type="password" autocomplete="current-password" />
     <label for="pw-new">New password</label>
     <input id="pw-new" class="draft-field" type="password" autocomplete="new-password" />
     <p class="field-hint">At least 10 characters.</p>
     <p class="row-actions">
-      <button class="button" onclick="savePassword()">Change password</button>
-      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+      <button class="button" onclick="savePassword(${forced})">Set password</button>
+      ${forced ? '' : '<button class="button ghost" onclick="closeDialog()">Cancel</button>'}</p>`);
+  // A forced change must not be escapable via the close button or Escape.
+  if (forced) {
+    const dlg = el('app-dialog');
+    const closeBtn = dlg && dlg.querySelector('.dialog-close');
+    if (closeBtn) closeBtn.remove();
+    if (dlg) dlg.addEventListener('cancel', (event) => event.preventDefault());
+  }
 }
 
-async function savePassword() {
+async function savePassword(forced = false) {
   const response = await fetch('/api/auth/password', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ current_password: el('pw-current').value,
@@ -138,6 +148,12 @@ async function savePassword() {
   if (!response.ok) return toast((await response.json()).detail || 'could not change', false);
   closeDialog();
   toast('Password changed');
+  if (forced) {
+    // The flag is now clear server-side; refresh identity and open the app.
+    try { principal = await (await fetch('/api/auth/me')).json(); } catch { /* keep going */ }
+    renderWho();
+    switchView('home');
+  }
 }
 
 // --- shell ------------------------------------------------------------------
@@ -379,7 +395,7 @@ async function wizardConnect() {
       notes needs the write account as well; without it the workflow still runs and records
       what it would have written.</p>
     <p class="row-actions">
-      <button class="button ghost" onclick="testConnection()">Test connection</button>
+      <button class="button ghost" onclick="testEnvironmentConnection()">Test connection</button>
     </p>
     <p id="conn-result" class="field-hint"></p>
     ${wizardNav('Back', 'Next', 'wizardNext()', {
@@ -388,7 +404,7 @@ async function wizardConnect() {
         : '' })}`;
 }
 
-async function testConnection() {
+async function testEnvironmentConnection() {
   const target = el('conn-result');
   target.textContent = 'Testing…';
   const result = await (await fetch('/api/connections/test', { method: 'POST' })).json();
@@ -1124,20 +1140,40 @@ async function renderAgents(token = viewToken) {
           const count = agentCache.filter(a => inTab(a, t.id)).length;
           const on = t.id === agentsTab;
           return `<button class="agent-tab ${on ? 'on' : ''}" role="tab"
-            aria-selected="${on}" onclick="selectAgentsTab('${t.id}')">${esc(t.label)}
+            id="agent-tab-${t.id}" aria-controls="agent-panel" aria-selected="${on}"
+            tabindex="${on ? '0' : '-1'}" onclick="selectAgentsTab('${t.id}')"
+            onkeydown="handleAgentTabKey(event, '${t.id}')">${esc(t.label)}
             <span class="agent-tab-count">${count}</span></button>`;
         }).join('')}
       </div>
       <button class="button ghost small" onclick="exportAllAgents()">Download all (.zip)</button>
     </div>
-    <div class="agent-grid" role="tabpanel">
+    <div class="agent-grid" id="agent-panel" role="tabpanel"
+      aria-labelledby="agent-tab-${agentsTab}">
       ${shown.map(agentCard).join('')}
     </div>`;
 }
 
-function selectAgentsTab(tab) {
+async function selectAgentsTab(tab, restoreFocus = false) {
   agentsTab = tab;
-  renderAgents();
+  await renderAgents();
+  if (restoreFocus) {
+    const active = el(`agent-tab-${tab}`);
+    if (active) active.focus();
+  }
+}
+
+function handleAgentTabKey(event, tab) {
+  const tabs = ['incident_remediation', 'ticket_to_pr'];
+  const index = tabs.indexOf(tab);
+  let next = null;
+  if (event.key === 'ArrowRight') next = tabs[(index + 1) % tabs.length];
+  if (event.key === 'ArrowLeft') next = tabs[(index - 1 + tabs.length) % tabs.length];
+  if (event.key === 'Home') next = tabs[0];
+  if (event.key === 'End') next = tabs[tabs.length - 1];
+  if (!next) return;
+  event.preventDefault();
+  selectAgentsTab(next, true);
 }
 
 function exportAllAgents() {
@@ -1354,20 +1390,43 @@ async function resetAgent(id) {
 
 let connectionCache = [];
 
-// Small brand marks, inline so there is no external request and nothing to
-// fail to load. Simplified but recognisable: ServiceNow's green mark, Jira's
-// stacked blue chevrons.
+// Compact vector brand marks are inline so they inherit the app's crisp
+// rendering at every scale and never depend on an external image request.
 const CONNECTOR_LOGOS = {
   servicenow: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
-    <circle cx="16" cy="16" r="15" fill="#62D84E"/>
-    <path d="M16 7.5a8.5 8.5 0 0 0-6.7 13.7 2.2 2.2 0 0 1 .3-2.9 5.9 5.9 0 1 1 8.9 0 2.2 2.2 0 0 1 .3 2.9A8.5 8.5 0 0 0 16 7.5z" fill="#0b1a12"/></svg>`,
+    <rect x="2" y="2" width="28" height="28" rx="10" fill="#62D84E"/>
+    <path d="M7.5 20.5v-3.1a8.5 8.5 0 0 1 17 0v3.1c0 1.3-1.5 2-2.5 1.2l-2.4-1.9a5.8 5.8 0 0 1-7.2 0L10 21.7c-1 .8-2.5.1-2.5-1.2z" fill="#fff"/>
+    <circle cx="16" cy="16.5" r="2.4" fill="#23834A"/></svg>`,
   jira: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
     <path d="M23.5 5H15a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5A4.9 4.9 0 0 0 26.4 16V7.9A2.9 2.9 0 0 0 23.5 5z" fill="#2684FF"/>
     <path d="M19.3 9.3h-8.5a4.9 4.9 0 0 0 4.9 4.9h1.6v1.5a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".8"/>
     <path d="M15.1 13.6H6.6a4.9 4.9 0 0 0 4.9 4.9h1.6V20a4.9 4.9 0 0 0 4.9 4.9v-8.4a2.9 2.9 0 0 0-2.9-2.9z" fill="#2684FF" opacity=".6"/></svg>`,
+  splunk: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
+    <rect x="2" y="2" width="28" height="28" rx="8" fill="#111820" stroke="#64748B"/>
+    <path d="m10 9 9 7-9 7" fill="none" stroke="#65A637" stroke-width="3.2"
+      stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M20.5 23h3" stroke="#B8E986" stroke-width="2.5" stroke-linecap="round"/></svg>`,
+  datadog: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
+    <rect x="2" y="2" width="28" height="28" rx="8" fill="#632CA6"/>
+    <path d="m8 12 3.4-4 3.2 2.2h3L20.8 8l3.4 4-1.4 2.5v5.2c0 2.6-2.2 4.8-4.8 4.8h-4c-2.6 0-4.8-2.2-4.8-4.8v-5.2L8 12z" fill="#fff"/>
+    <circle cx="13.2" cy="16.2" r="1.2" fill="#632CA6"/>
+    <circle cx="18.8" cy="16.2" r="1.2" fill="#632CA6"/>
+    <path d="M14 20h4" stroke="#632CA6" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  dynatrace: `<svg viewBox="0 0 32 32" class="connector-logo" aria-hidden="true">
+    <path d="M4 8.5 15.5 3 22 10.5 13.5 16z" fill="#1496FF"/>
+    <path d="m15.5 3 12.5 5.5-6 11-6.5-9z" fill="#73BE28"/>
+    <path d="m4 8.5 9.5 7.5L10 29 3 21z" fill="#6F2DA8"/>
+    <path d="m13.5 16 8.5 3.5L10 29z" fill="#00A1B2"/>
+    <path d="m22 10.5 6-2v12.8L10 29l12-9.5z" fill="#B4DC00" opacity=".9"/></svg>`,
 };
 
-const CONNECTOR_LABELS = { servicenow: 'ServiceNow', jira: 'Jira' };
+const CONNECTOR_LABELS = {
+  servicenow: 'ServiceNow',
+  jira: 'Jira',
+  splunk: 'Splunk',
+  datadog: 'Datadog',
+  dynatrace: 'Dynatrace',
+};
 
 async function renderConnections(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
@@ -1390,17 +1449,23 @@ async function renderConnections(token = viewToken) {
           ${isAdmin ? '' : 'disabled'} aria-haspopup="true" aria-controls="add-menu"
           aria-expanded="false">Add connection <i class="caret" aria-hidden="true">▾</i></button>
         <div class="menu hidden" id="add-menu" role="menu">
-          <button class="menu-item" onclick="openConnectionDialog(null,'servicenow')">
+          <button class="menu-item" role="menuitem" onclick="openConnectionDialog(null,'servicenow')">
             ${CONNECTOR_LOGOS.servicenow}<span>ServiceNow</span></button>
-          <button class="menu-item" onclick="openConnectionDialog(null,'jira')">
+          <button class="menu-item" role="menuitem" onclick="openConnectionDialog(null,'jira')">
             ${CONNECTOR_LOGOS.jira}<span>Jira</span></button>
+          <button class="menu-item" role="menuitem" onclick="openConnectionDialog(null,'splunk')">
+            ${CONNECTOR_LOGOS.splunk}<span>Splunk</span></button>
+          <button class="menu-item" role="menuitem" onclick="openConnectionDialog(null,'datadog')">
+            ${CONNECTOR_LOGOS.datadog}<span>Datadog</span></button>
+          <button class="menu-item" role="menuitem" onclick="openConnectionDialog(null,'dynatrace')">
+            ${CONNECTOR_LOGOS.dynatrace}<span>Dynatrace</span></button>
         </div>
       </div>
     </div>
     ${data.connections.length
       ? `<div class="conn-list">${data.connections.map(c => connectionRow(c, isAdmin, canTest)).join('')}</div>`
       : `<div class="conn-empty">No connections yet. Use <strong>Add connection</strong> to point a
-         workflow at ServiceNow or Jira.</div>`}
+         workflow at ServiceNow, Jira, or an observability platform.</div>`}
     ${data.environment_usable ? `<p class="field-hint">A ServiceNow connection is also configured
       from environment variables (<code>${esc(data.environment_auth_method)}</code> auth); a
       workflow with none selected falls back to it.</p>` : ''}`;
@@ -1434,7 +1499,11 @@ function closeAddMenu() {
 }
 
 function connectionRow(c, isAdmin, canTest) {
-  const queue = c.kind === 'jira' ? (c.project_key || c.jql) : c.assignment_group;
+  const queue = c.kind === 'jira' ? (c.project_key || c.jql)
+    : c.kind === 'splunk' ? c.search_query
+    : c.kind === 'datadog' ? c.service_filter
+    : c.kind === 'dynatrace' ? c.entity_selector
+    : c.assignment_group;
   const status = c.last_test_ok === true ? 'on' : c.last_test_ok === false ? 'off' : 'unknown';
   const statusText = c.last_test_ok === true ? 'Connected'
     : c.last_test_ok === false ? 'Failing' : 'Untested';
@@ -1448,7 +1517,8 @@ function connectionRow(c, isAdmin, canTest) {
       <div class="conn-main">
         <div class="conn-name">${esc(c.name)}
           ${queue ? `<span class="conn-queue">${esc(queue)}</span>` : ''}</div>
-        <div class="conn-sub"><code>${esc(c.base_url)}</code> · ${esc(c.username)}</div>
+        <div class="conn-sub"><code>${esc(c.base_url)}</code>${
+          c.username ? ` · ${esc(c.username)}` : ''}</div>
       </div>
       <div class="conn-actions" onclick="event.stopPropagation()">
         <button class="icon-button" title="Edit" onclick="openConnectionDialog('${c.id}')"
@@ -1463,9 +1533,11 @@ function openConnectionDialog(id, kind) {
   const c = connectionCache.find(x => x.id === id) || {};
   const editing = Boolean(id);
   kind = c.kind || kind || 'servicenow';
-  return kind === 'jira'
-    ? openJiraDialog(c, id, editing)
-    : openServiceNowDialog(c, id, editing);
+  if (kind === 'jira') return openJiraDialog(c, id, editing);
+  if (['splunk', 'datadog', 'dynatrace'].includes(kind)) {
+    return openObservabilityDialog(c, id, editing, kind);
+  }
+  return openServiceNowDialog(c, id, editing);
 }
 
 function openServiceNowDialog(c, id, editing) {
@@ -1570,22 +1642,110 @@ function openJiraDialog(c, id, editing) {
       <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
 }
 
+function openObservabilityDialog(c, id, editing, kind) {
+  const definitions = {
+    splunk: {
+      label: 'Splunk',
+      urlLabel: 'Splunk management URL',
+      urlPlaceholder: 'https://splunk.example.com:8089',
+      secretLabel: 'Access token',
+      secretHint: 'Create a Splunk authentication token with access to the indexes this workflow monitors.',
+      scopeLabel: 'Default search (optional)',
+      scopePlaceholder: 'index=prod service=checkout',
+      scopeField: 'search_query',
+    },
+    datadog: {
+      label: 'Datadog',
+      urlLabel: 'Datadog API URL',
+      urlPlaceholder: 'https://api.datadoghq.com',
+      secretLabel: 'API key',
+      secretHint: 'Use an API key and application key with the minimum scopes needed by this workspace.',
+      scopeLabel: 'Service or tag filter (optional)',
+      scopePlaceholder: 'service:checkout env:prod',
+      scopeField: 'service_filter',
+    },
+    dynatrace: {
+      label: 'Dynatrace',
+      urlLabel: 'Dynatrace environment URL',
+      urlPlaceholder: 'https://abc123.live.dynatrace.com',
+      secretLabel: 'API token',
+      secretHint: 'The token needs the problems.read scope for the connection check and incident context.',
+      scopeLabel: 'Entity selector (optional)',
+      scopePlaceholder: 'type(SERVICE),tag(prod)',
+      scopeField: 'entity_selector',
+    },
+  };
+  const d = definitions[kind];
+  const hasPrimarySecret = c.secrets_set && (
+    kind === 'datadog' ? c.secrets_set.api_key : c.secrets_set.access_token);
+  showDialog(editing ? `Edit ${c.name}` : `Add ${d.label} connection`, `
+    <input type="hidden" id="cn-kind" value="${kind}" />
+    <label for="cn-name">Connection name</label>
+    <input id="cn-name" class="draft-field" value="${esc(c.name || '')}"
+      placeholder="e.g. Production ${d.label}" />
+
+    <label for="cn-url">${d.urlLabel}</label>
+    <input id="cn-url" class="draft-field" value="${esc(c.base_url || '')}"
+      placeholder="${d.urlPlaceholder}" />
+
+    <label for="cn-token">${d.secretLabel}</label>
+    <input id="cn-token" class="draft-field" type="password" autocomplete="new-password"
+      placeholder="${hasPrimarySecret ? 'unchanged — leave blank to keep it' : ''}" />
+    <p class="field-hint">${d.secretHint}</p>
+
+    ${kind === 'datadog' ? `
+      <label for="cn-app-key">Application key</label>
+      <input id="cn-app-key" class="draft-field" type="password" autocomplete="new-password"
+        placeholder="${c.secrets_set && c.secrets_set.app_key
+          ? 'unchanged — leave blank to keep it' : ''}" />` : ''}
+
+    <label for="cn-scope">${d.scopeLabel}</label>
+    <input id="cn-scope" class="draft-field" value="${esc(c[d.scopeField] || '')}"
+      placeholder="${d.scopePlaceholder}" />
+    <p class="field-hint">Used as the default scope when this connection supplies operational context.</p>
+
+    <div class="dialog-test">
+      <button class="button small" onclick="testDraft(${editing ? `'${id}'` : 'null'})">Test connection</button>
+      <span class="dialog-test-result" id="draft-test-result"></span>
+    </div>
+    <p class="row-actions">
+      <button class="button" onclick="saveConnection(${editing ? `'${id}'` : 'null'})">
+        ${editing ? 'Save changes' : 'Create connection'}</button>
+      <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
+}
+
 function toggleOauthFields() {
   el('cn-oauth').classList.toggle('hidden', el('cn-auth').value !== 'oauth');
 }
 
 function _connectionForm(id) {
   const kind = el('cn-kind').value;
-  return kind === 'jira'
-    ? { kind: 'jira', name: el('cn-name').value.trim(), base_url: el('cn-url').value.trim(),
-        username: el('cn-user').value.trim(), api_token: el('cn-token').value || null,
-        project_key: el('cn-project').value.trim(), jql: el('cn-jql').value.trim() }
-    : { kind: 'servicenow', name: el('cn-name').value.trim(), base_url: el('cn-url').value.trim(),
-        auth_type: el('cn-auth').value, username: el('cn-user').value.trim(),
-        password: el('cn-pass').value || null,
-        client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
-        client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
-        assignment_group: el('cn-queue').value.trim(), extra_query: el('cn-extra').value.trim() };
+  if (kind === 'jira') {
+    return { kind, name: el('cn-name').value.trim(), base_url: el('cn-url').value.trim(),
+      username: el('cn-user').value.trim(), api_token: el('cn-token').value || null,
+      project_key: el('cn-project').value.trim(), jql: el('cn-jql').value.trim() };
+  }
+  if (['splunk', 'datadog', 'dynatrace'].includes(kind)) {
+    const shared = { kind, name: el('cn-name').value.trim(),
+      base_url: el('cn-url').value.trim() };
+    if (kind === 'splunk') {
+      return { ...shared, access_token: el('cn-token').value || null,
+        search_query: el('cn-scope').value.trim() };
+    }
+    if (kind === 'datadog') {
+      return { ...shared, api_key: el('cn-token').value || null,
+        app_key: el('cn-app-key').value || null,
+        service_filter: el('cn-scope').value.trim() };
+    }
+    return { ...shared, access_token: el('cn-token').value || null,
+      entity_selector: el('cn-scope').value.trim() };
+  }
+  return { kind: 'servicenow', name: el('cn-name').value.trim(),
+    base_url: el('cn-url').value.trim(), auth_type: el('cn-auth').value,
+    username: el('cn-user').value.trim(), password: el('cn-pass').value || null,
+    client_id: el('cn-cid') ? el('cn-cid').value.trim() : '',
+    client_secret: el('cn-csec') ? (el('cn-csec').value || null) : null,
+    assignment_group: el('cn-queue').value.trim(), extra_query: el('cn-extra').value.trim() };
 }
 
 async function testDraft(id) {
@@ -1627,7 +1787,7 @@ async function deleteConnection(id) {
   renderConnections();
 }
 
-async function testConnection(id) {
+async function testStoredConnection(id) {
   const target = el(`conn-result-${id}`);
   if (target) target.textContent = 'Testing…';
   const response = await fetch(`/api/connections/${id}/test`, { method: 'POST' });
@@ -1730,12 +1890,23 @@ function openUserDialog(id) {
       <button class="button ghost" onclick="closeDialog()">Cancel</button></p>`);
 }
 
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
 async function saveUser(id) {
+  const name = el('us-name').value.trim();
+  if (!name) return toast('Enter a name', false);
+  if (!id) {
+    // Match the server: a valid email and a non-blank identity, caught here so
+    // the invite does not round-trip only to be rejected.
+    const email = el('us-email').value.trim();
+    if (!EMAIL_RE.test(email)) return toast('Enter a valid email address', false);
+    if (!el('us-pass').value) return toast('Set an initial password', false);
+  }
   const body = id
-    ? { display_name: el('us-name').value.trim(), role: el('us-role').value,
+    ? { display_name: name, role: el('us-role').value,
         active: el('us-active') ? el('us-active').checked : undefined,
         password: el('us-pass').value || undefined }
-    : { email: el('us-email').value.trim(), display_name: el('us-name').value.trim(),
+    : { email: el('us-email').value.trim(), display_name: name,
         role: el('us-role').value, password: el('us-pass').value };
   Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
   const response = await fetch(id ? `/api/users/${id}` : '/api/users', {
@@ -1820,6 +1991,10 @@ function showApp() {
   renderKillswitch();
   switchView(currentView);
   connect();
+  // An invited user is holding a password the admin chose; the server blocks
+  // every role-gated route until it is replaced, so force the change here
+  // rather than letting them hit 403s.
+  if (principal && principal.must_change_password) openPasswordDialog(true);
 }
 
 // --- live socket ------------------------------------------------------------

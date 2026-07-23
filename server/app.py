@@ -19,7 +19,7 @@ if sys.platform == "win32":
 
 from fastapi import Depends, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -31,7 +31,8 @@ from agents import export as agent_export  # noqa: E402
 from agents.catalogue import ALLOWED_MODELS, CATALOGUE, Tier  # noqa: E402
 from agents.catalogue import get as catalogue_get  # noqa: E402
 from agents.guard import TOOL_TIERS, GuardrailViolation, resolve  # noqa: E402
-from auth import (SESSION_COOKIE, AdminNotConfigured, InvalidCredentials,  # noqa: E402
+from auth import (COOKIE_SECURE, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS,  # noqa: E402
+                  AdminNotConfigured, InvalidCredentials, normalise_email, valid_email,
                   PasswordPolicy, Principal, admin_from_env, current_principal,
                   ensure_admin, hash_password, issue_session, provider,
                   record_login, require_role, set_password)
@@ -189,7 +190,8 @@ async def login(payload: LoginRequest, response: Response) -> dict:
         principal = Principal(user, workspace)
         token = issue_session(user)
         view = principal.as_dict()
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                        secure=COOKIE_SECURE, max_age=SESSION_MAX_AGE_SECONDS)
     return view
 
 
@@ -244,6 +246,23 @@ class UserRequest(BaseModel):
     role: Role = Role.viewer
     password: str = Field(min_length=1, max_length=300)
 
+    @field_validator("email")
+    @classmethod
+    def _email_shape(cls, value: str) -> str:
+        # min_length alone lets "not-an-email" and three spaces through, both of
+        # which then persist as a broken or empty identity. Validate the shape
+        # and return it normalised, so the stored value matches what login sees.
+        if not valid_email(value):
+            raise ValueError("that is not a valid email address")
+        return normalise_email(value)
+
+    @field_validator("display_name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("a name is required")
+        return value.strip()
+
 
 class UserUpdateRequest(BaseModel):
     display_name: str | None = Field(default=None, max_length=80)
@@ -252,6 +271,13 @@ class UserUpdateRequest(BaseModel):
     # Set by an admin, which forces a change at next login rather than leaving
     # a password only the admin chose in place indefinitely.
     password: str | None = Field(default=None, max_length=300)
+
+    @field_validator("display_name")
+    @classmethod
+    def _name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("a name cannot be blank")
+        return value.strip() if value is not None else None
 
 
 def _user_view(user: User) -> dict:
@@ -737,15 +763,16 @@ class _DetachedConnection:
 # --- connections -------------------------------------------------------------
 
 class ConnectionRequest(BaseModel):
-    """A ServiceNow instance, named, with its own credentials.
+    """A named external-system connection with encrypted credentials.
 
     Credentials are accepted here and encrypted at rest (see crypto.py). That
-    is a deliberate reversal of the earlier env-only design: several instances
-    cannot be described by one set of environment variables, and a platform
-    that manages connections has to be able to hold their credentials. What
-    does not change is that no endpoint ever returns them.
+    lets a workspace hold several instances without exposing a stored secret
+    through any endpoint.
     """
-    kind: str = Field(default="servicenow", pattern="^(servicenow|jira)$")
+    kind: str = Field(
+        default="servicenow",
+        pattern="^(servicenow|jira|splunk|datadog|dynatrace)$",
+    )
     name: str = Field(min_length=1, max_length=80)
     base_url: str = Field(min_length=1, max_length=300)
     username: str = Field(default="", max_length=200)
@@ -765,6 +792,15 @@ class ConnectionRequest(BaseModel):
     project_key: str | None = Field(default=None, max_length=80)
     jql: str | None = Field(default=None, max_length=500)
 
+    # Observability connectors. Splunk and Dynatrace both use a bearer-style
+    # access token; Datadog uses its API and application key pair.
+    access_token: str | None = Field(default=None, max_length=1000)
+    api_key: str | None = Field(default=None, max_length=1000)
+    app_key: str | None = Field(default=None, max_length=1000)
+    search_query: str | None = Field(default=None, max_length=500)
+    service_filter: str | None = Field(default=None, max_length=500)
+    entity_selector: str | None = Field(default=None, max_length=500)
+
 
 def _connection_view(connection) -> dict:
     from crypto import present
@@ -781,6 +817,10 @@ def _connection_view(connection) -> dict:
         # Jira
         "project_key": config.get("project_key", ""),
         "jql": config.get("jql", ""),
+        # Observability sources
+        "search_query": config.get("search_query", ""),
+        "service_filter": config.get("service_filter", ""),
+        "entity_selector": config.get("entity_selector", ""),
         "enabled": connection.enabled,
         # Presence only. There is no endpoint that returns a stored secret.
         "secrets_set": present(connection.secrets),
@@ -806,20 +846,37 @@ async def list_connections(principal: Principal = Depends(require_role(Role.view
     }
 
 
-def _apply_connection(connection, payload: ConnectionRequest) -> None:
-    from crypto import encrypt
-    connection.name = payload.name
-    connection.kind = payload.kind
+def _connection_parts(payload: ConnectionRequest) -> tuple[dict, tuple]:
+    """Return public configuration and submitted secret values for a payload."""
     if payload.kind == "jira":
-        connection.config = {
+        config = {
             "base_url": payload.base_url.rstrip("/"),
             "username": payload.username.strip(),      # the account email
             "project_key": (payload.project_key or "").strip(),
             "jql": (payload.jql or "").strip(),
         }
         secret_fields = (("api_token", payload.api_token),)
+    elif payload.kind == "splunk":
+        config = {
+            "base_url": payload.base_url.rstrip("/"),
+            "search_query": (payload.search_query or "").strip(),
+        }
+        secret_fields = (("access_token", payload.access_token),)
+    elif payload.kind == "datadog":
+        config = {
+            "base_url": payload.base_url.rstrip("/"),
+            "service_filter": (payload.service_filter or "").strip(),
+        }
+        secret_fields = (("api_key", payload.api_key),
+                         ("app_key", payload.app_key))
+    elif payload.kind == "dynatrace":
+        config = {
+            "base_url": payload.base_url.rstrip("/"),
+            "entity_selector": (payload.entity_selector or "").strip(),
+        }
+        secret_fields = (("access_token", payload.access_token),)
     else:
-        connection.config = {
+        config = {
             "base_url": payload.base_url.rstrip("/"),
             "auth_type": payload.auth_type,
             "username": payload.username.strip(),
@@ -829,6 +886,14 @@ def _apply_connection(connection, payload: ConnectionRequest) -> None:
         }
         secret_fields = (("password", payload.password),
                          ("client_secret", payload.client_secret))
+    return config, secret_fields
+
+
+def _apply_connection(connection, payload: ConnectionRequest) -> None:
+    from crypto import encrypt
+    connection.name = payload.name
+    connection.kind = payload.kind
+    connection.config, secret_fields = _connection_parts(payload)
     secrets = dict(connection.secrets or {})
     # An omitted secret leaves the stored one alone, so editing a queue name
     # does not require retyping a secret nobody can read back.
@@ -931,6 +996,36 @@ async def _run_connection_test(kind: str, config: dict, secrets: dict) -> tuple:
                 detail += f" {target} currently matches {len(issues)} issue(s)."
                 return True, detail, len(issues)
             return True, detail, None
+        if kind in {"splunk", "datadog", "dynatrace"}:
+            import httpx
+
+            base_url = config.get("base_url", "").rstrip("/")
+            if kind == "splunk":
+                url = f"{base_url}/services/server/info?output_mode=json"
+                headers = {
+                    "Authorization": f"Splunk {secrets.get('access_token', '')}",
+                    "Accept": "application/json",
+                }
+                label = "Splunk"
+            elif kind == "datadog":
+                url = f"{base_url}/api/v1/validate"
+                headers = {
+                    "DD-API-KEY": secrets.get("api_key", ""),
+                    "DD-APPLICATION-KEY": secrets.get("app_key", ""),
+                    "Accept": "application/json",
+                }
+                label = "Datadog"
+            else:
+                url = f"{base_url}/api/v2/problems?pageSize=1"
+                headers = {
+                    "Authorization": f"Api-Token {secrets.get('access_token', '')}",
+                    "Accept": "application/json",
+                }
+                label = "Dynatrace"
+            response = await asyncio.to_thread(
+                httpx.get, url, headers=headers, timeout=15)
+            response.raise_for_status()
+            return True, f"Connected to {label}.", None
         oauth = config.get("auth_type") == "oauth"
         client = servicenow.ServiceNowClient(
             config.get("base_url", "").rstrip("/"), config.get("username", ""),
@@ -994,19 +1089,8 @@ async def test_draft_connection(
     the same rule the save path follows, so Test and Save agree on what will run.
     """
     from crypto import decrypt
-    if payload.kind == "jira":
-        config = {"base_url": payload.base_url.rstrip("/"), "username": payload.username.strip(),
-                  "project_key": (payload.project_key or "").strip(),
-                  "jql": (payload.jql or "").strip()}
-        secrets = {"api_token": payload.api_token or ""}
-    else:
-        config = {"base_url": payload.base_url.rstrip("/"), "auth_type": payload.auth_type,
-                  "username": payload.username.strip(),
-                  "client_id": (payload.client_id or "").strip(),
-                  "assignment_group": payload.assignment_group.strip(),
-                  "extra_query": payload.extra_query.strip()}
-        secrets = {"password": payload.password or "",
-                   "client_secret": payload.client_secret or ""}
+    config, secret_fields = _connection_parts(payload)
+    secrets = {name: value or "" for name, value in secret_fields}
 
     if connection_id:
         with session_scope() as session:

@@ -93,7 +93,7 @@ Index("ix_user_email", User.workspace_id, User.email, unique=True)
 
 
 class Connection(Base):
-    """One configured external system — one ServiceNow instance, one repository.
+    """One configured external system, such as a ticketing or telemetry source.
 
     Several of a kind are expected: a dev instance and a production one are
     different connections, and a workflow names the one it uses. That is why
@@ -108,7 +108,7 @@ class Connection(Base):
     __tablename__ = "connection"
     id = Column(String, primary_key=True, default=_uuid)
     workspace_id = Column(String, ForeignKey("workspace.id"), nullable=False)
-    kind = Column(String, nullable=False)          # servicenow | jira | git
+    kind = Column(String, nullable=False)  # servicenow | jira | splunk | datadog | dynatrace
     name = Column(String, nullable=False)
     config = Column(JSON, nullable=False, default=dict)
     secrets = Column(JSON, nullable=True)          # encrypted at rest

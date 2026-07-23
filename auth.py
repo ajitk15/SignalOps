@@ -21,22 +21,48 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Protocol
 
 from fastapi import Cookie, Depends, HTTPException
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from db import audit, session_scope
 from models import ROLE_RANK, Role, User, Workspace
 
 logger = logging.getLogger("auth")
 
+# Sessions expire server-side, not just when the cookie is cleared. A stolen or
+# forgotten session should not be valid forever; the signed timestamp is checked
+# on every request so expiry cannot be bypassed by keeping the cookie.
+SESSION_MAX_AGE_SECONDS = int(os.getenv("SIGNALOPS_SESSION_MAX_AGE", str(12 * 3600)))
+
+# The Secure flag keeps the cookie off plain HTTP. It is omitted for local
+# development (where there is no TLS) and required everywhere else, keyed to the
+# same env var that already gates the dummy auth provider.
+COOKIE_SECURE = os.getenv("SIGNALOPS_ENV", "local").lower() != "local"
+
+# Deliberately permissive: one @, something before, a dotted domain after, no
+# spaces. Full RFC 5322 validation belongs in email-validator, but this rejects
+# the cases that actually reach the database — "not-an-email", blanks, spaces —
+# without adding a dependency.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalise_email(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def valid_email(value: str | None) -> bool:
+    return bool(_EMAIL_RE.match(normalise_email(value)))
+
+
 SESSION_COOKIE = "signalops_session"
 # Dev-only default: a fixed secret is fine while identity itself is a stub, and
 # a real provider will bring a real secret with it.
 _SECRET = os.getenv("SIGNALOPS_SESSION_SECRET", "dev-only-not-a-real-secret")
-_serializer = URLSafeSerializer(_SECRET, salt="signalops-session")
+_serializer = URLSafeTimedSerializer(_SECRET, salt="signalops-session")
 
 
 class AuthProvider(Protocol):
@@ -107,9 +133,12 @@ class PasswordAuthProvider:
         if not user.active:
             raise InvalidCredentials("email or password is incorrect")
         if user.locked_until and time.time() < user.locked_until:
-            remaining = int(user.locked_until - time.time())
-            raise InvalidCredentials(
-                f"too many failed attempts; try again in {remaining} seconds")
+            # The lockout is enforced, but the message stays generic. A distinct
+            # "too many attempts" reply for a locked account — while an unknown
+            # address gets the ordinary error — tells an attacker which
+            # addresses are real. The lock still holds; it just does not
+            # announce itself. Locked attempts are audited by the caller.
+            raise InvalidCredentials("email or password is incorrect")
         if not user.password_hash:
             raise InvalidCredentials("email or password is incorrect")
 
@@ -257,8 +286,10 @@ def _load_session(raw: str | None) -> dict | None:
     if not raw:
         return None
     try:
-        return _serializer.loads(raw)
-    except BadSignature:
+        # max_age is enforced here, so a session past its lifetime is rejected
+        # even if the cookie is still present.
+        return _serializer.loads(raw, max_age=SESSION_MAX_AGE_SECONDS)
+    except (BadSignature, SignatureExpired):
         return None
 
 
@@ -303,13 +334,26 @@ def current_principal(signalops_session: str | None = Cookie(default=None)) -> P
         return Principal(user, workspace)
 
 
+# The detail every route uses to signal "change your password first", so the
+# client can recognise it and redirect rather than parsing prose.
+PASSWORD_CHANGE_REQUIRED = "password change required"
+
+
 def require_role(minimum: Role):
     """Route dependency enforcing a minimum role.
 
     Enforced server-side regardless of what the UI shows — hiding a button is
     presentation, not authorisation.
+
+    It also enforces the forced-password-change: an invited user holds a
+    credential the admin chose and knows, so until they replace it the session
+    can reach nothing role-gated. The two routes that must stay open to escape
+    that state — reading your own identity and changing your password — use
+    `current_principal` directly and are not blocked here.
     """
     def dependency(principal: Principal = Depends(current_principal)) -> Principal:
+        if principal.user.must_change_password:
+            raise HTTPException(status_code=403, detail=PASSWORD_CHANGE_REQUIRED)
         if not principal.can(minimum):
             raise HTTPException(
                 status_code=403,
