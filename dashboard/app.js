@@ -81,6 +81,11 @@ async function loadAuthState() {
 async function doLogin(event) {
   event.preventDefault();
   const status = el('login-status');
+  const submit = el('login-submit');
+  // Disable the button while the request is in flight so a double-tap or a
+  // repeated Enter cannot fire a second sign-in.
+  submit.disabled = true;
+  submit.setAttribute('aria-busy', 'true');
   status.textContent = 'Signing in…';
   try {
     const response = await fetch('/api/auth/login', {
@@ -94,6 +99,9 @@ async function doLogin(event) {
     showApp();
   } catch (error) {
     status.textContent = String(error.message);
+  } finally {
+    submit.disabled = false;
+    submit.removeAttribute('aria-busy');
   }
 }
 
@@ -181,12 +189,41 @@ const VIEW_RENDERERS = {
   users: renderUsers,
 };
 
+// Bumped on every navigation. An async renderer captures the token it started
+// under and checks it is still current before writing to the DOM, so a slow
+// request that resolves after the user has moved on cannot paint the wrong view
+// under the new title.
+let viewToken = 0;
+
+function viewIsCurrent(token) { return token === viewToken; }
+
 function switchView(view) {
+  viewToken += 1;
   currentView = view;
   el('view-title').textContent = VIEW_TITLES[view] || view;
   renderNav();
+  closeNav();
   const render = VIEW_RENDERERS[view];
-  return render ? render() : renderPlaceholder(view);
+  return render ? render(viewToken) : renderPlaceholder(view);
+}
+
+// --- mobile navigation drawer -----------------------------------------------
+
+function toggleNav() {
+  el('app').classList.contains('nav-open') ? closeNav() : openNav();
+}
+function openNav() {
+  el('app').classList.add('nav-open');
+  el('nav-scrim').hidden = false;
+  const toggle = el('nav-toggle');
+  if (toggle) { toggle.setAttribute('aria-expanded', 'true'); toggle.setAttribute('aria-label', 'Close navigation'); }
+}
+function closeNav() {
+  el('app').classList.remove('nav-open');
+  const scrim = el('nav-scrim');
+  if (scrim) scrim.hidden = true;
+  const toggle = el('nav-toggle');
+  if (toggle) { toggle.setAttribute('aria-expanded', 'false'); toggle.setAttribute('aria-label', 'Open navigation'); }
 }
 
 // --- onboarding wizard ------------------------------------------------------
@@ -584,7 +621,7 @@ const RUN_STATUS_LABEL = {
   awaiting_approval: 'Awaiting approval', running: 'Running', pending: 'Pending',
 };
 
-async function renderHome() {
+async function renderHome(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
   let d;
   try {
@@ -593,6 +630,7 @@ async function renderHome() {
     el('view').innerHTML = '<div class="empty">The dashboard could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   const c = d.counts;
 
   // A brand-new workspace gets a genuine welcome and one clear next step
@@ -647,7 +685,9 @@ async function renderHome() {
         </button>`).join('')}
     </div>
 
-    ${c.pending_approvals ? `<div class="home-callout" onclick="switchView('approvals')">
+    ${c.pending_approvals ? `<div class="home-callout" role="button" tabindex="0"
+      aria-label="${c.pending_approvals} approval${c.pending_approvals > 1 ? 's' : ''} waiting; go to approvals"
+      onclick="switchView('approvals')">
       <i class="ti">⚠</i>
       <span><strong>${c.pending_approvals} approval${c.pending_approvals > 1 ? 's' : ''}</strong>
         waiting on a human. Review ${c.pending_approvals > 1 ? 'them' : 'it'} →</span>
@@ -678,7 +718,9 @@ function homeSimBanner() {
 function homeRunRow(r) {
   const status = RUN_STATUS_CLASS[r.status] || '';
   return `
-    <div class="home-run" onclick="showRun('${r.id}')">
+    <div class="home-run" role="button" tabindex="0"
+      aria-label="Run ${esc(r.trigger_ref || r.id.slice(0, 8))}, ${
+        esc(RUN_STATUS_LABEL[r.status] || r.status)}" onclick="showRun('${r.id}')">
       <span class="home-run-ref">${esc(r.trigger_ref || r.id.slice(0, 8))}</span>
       <span class="tier-badge ${status}">${esc(RUN_STATUS_LABEL[r.status] || r.status)}</span>
       <span class="home-run-time">${new Date(r.started_at * 1000).toLocaleTimeString([],
@@ -688,12 +730,13 @@ function homeRunRow(r) {
 
 function homeConnRow(c) {
   const dot = c.last_test_ok === true ? 'on' : c.last_test_ok === false ? 'off' : 'unknown';
+  const word = c.last_test_ok === true ? 'Connected'
+    : c.last_test_ok === false ? 'Failing' : 'Untested';
   return `
     <div class="home-conn">
       <span class="conn-logo">${CONNECTOR_LOGOS[c.kind] || ''}</span>
       <span class="home-conn-name">${esc(c.name)}</span>
-      <span class="conn-status-dot ${dot}" title="${
-        c.last_test_ok === true ? 'Connected' : c.last_test_ok === false ? 'Failing' : 'Untested'}"></span>
+      <span class="conn-status ${dot}"><span class="conn-status-dot"></span>${word}</span>
     </div>`;
 }
 
@@ -710,7 +753,7 @@ const SAMPLE_TICKET = {
   kb_articles: ['KB0010023 — Diagnosing MQ 2059 errors'],
 };
 
-async function renderWorkflows() {
+async function renderWorkflows(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading workflows…</div>';
   let data;
   try {
@@ -719,6 +762,7 @@ async function renderWorkflows() {
     el('view').innerHTML = '<div class="empty">Workflows could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   // A fresh workspace lands on the wizard, not on an empty list — an empty
   // dashboard tells you nothing about what to do next. `active` is separate
   // from that so Set up can re-enter the wizard on a workflow that is already
@@ -857,7 +901,7 @@ const RUN_STATUS_CLASS = {
   awaiting_approval: 'warn', running: 'warn', pending: 'warn',
 };
 
-async function renderRuns() {
+async function renderRuns(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading runs…</div>';
   let data;
   try {
@@ -866,6 +910,7 @@ async function renderRuns() {
     el('view').innerHTML = '<div class="empty">Runs could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   el('view').innerHTML = data.runs.length ? `
     <div class="pipeline-note">Every step is recorded as it happens, so a run that fails
       part way is still legible afterwards rather than a gap.</div>
@@ -912,7 +957,7 @@ async function showRun(runId) {
 
 // --- approvals --------------------------------------------------------------
 
-async function renderApprovals() {
+async function renderApprovals(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading approvals…</div>';
   let data;
   try {
@@ -921,6 +966,7 @@ async function renderApprovals() {
     el('view').innerHTML = '<div class="empty">Approvals could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   el('view').innerHTML = `
     <div class="pipeline-note">
       An approval is bound to a hash of the exact plan it was shown. If the plan changes
@@ -998,7 +1044,7 @@ async function decide(approvalId, approved, node) {
 
 let agentCache = [];
 
-async function renderAgents() {
+async function renderAgents(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading agents…</div>';
   try {
     const data = await (await fetch('/api/agents')).json();
@@ -1007,6 +1053,7 @@ async function renderAgents() {
     el('view').innerHTML = '<div class="empty">Agents could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   const canEdit = principal.role === 'admin';
   el('view').innerHTML = `
     <div class="pipeline-note">
@@ -1255,7 +1302,7 @@ const CONNECTOR_LOGOS = {
 
 const CONNECTOR_LABELS = { servicenow: 'ServiceNow', jira: 'Jira' };
 
-async function renderConnections() {
+async function renderConnections(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
   let data;
   try {
@@ -1264,6 +1311,7 @@ async function renderConnections() {
     el('view').innerHTML = '<div class="empty">Connections could not be loaded.</div>';
     return;
   }
+  if (!viewIsCurrent(token)) return;
   connectionCache = data.connections;
   const isAdmin = principal.role === 'admin';
   const canTest = principal.role !== 'viewer';
@@ -1271,9 +1319,10 @@ async function renderConnections() {
     <div class="conn-bar">
       <span class="conn-bar-title">Connections</span>
       <div class="menu-wrap">
-        <button class="button small" onclick="toggleAddMenu(event)" ${isAdmin ? '' : 'disabled'}>
-          Add connection <i class="caret">▾</i></button>
-        <div class="menu hidden" id="add-menu">
+        <button class="button small" id="add-menu-btn" onclick="toggleAddMenu(event)"
+          ${isAdmin ? '' : 'disabled'} aria-haspopup="true" aria-controls="add-menu"
+          aria-expanded="false">Add connection <i class="caret" aria-hidden="true">▾</i></button>
+        <div class="menu hidden" id="add-menu" role="menu">
           <button class="menu-item" onclick="openConnectionDialog(null,'servicenow')">
             ${CONNECTOR_LOGOS.servicenow}<span>ServiceNow</span></button>
           <button class="menu-item" onclick="openConnectionDialog(null,'jira')">
@@ -1293,12 +1342,29 @@ async function renderConnections() {
 function toggleAddMenu(event) {
   event.stopPropagation();
   const menu = el('add-menu');
-  menu.classList.toggle('hidden');
-  if (!menu.classList.contains('hidden')) {
+  const btn = event.currentTarget;
+  const opening = menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !opening);
+  if (btn && btn.setAttribute) btn.setAttribute('aria-expanded', String(opening));
+  if (opening) {
+    // Move focus to the first choice so the keyboard can drive it, and wire an
+    // outside-click and Escape close.
+    const first = menu.querySelector('.menu-item');
+    if (first) first.focus();
     setTimeout(() => document.addEventListener('click', closeAddMenu, { once: true }), 0);
+    document.addEventListener('keydown', addMenuEscape);
   }
 }
-function closeAddMenu() { const m = el('add-menu'); if (m) m.classList.add('hidden'); }
+function addMenuEscape(event) {
+  if (event.key === 'Escape') closeAddMenu();
+}
+function closeAddMenu() {
+  const m = el('add-menu');
+  if (m) m.classList.add('hidden');
+  const btn = el('add-menu-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('keydown', addMenuEscape);
+}
 
 function connectionRow(c, isAdmin, canTest) {
   const queue = c.kind === 'jira' ? (c.project_key || c.jql) : c.assignment_group;
@@ -1306,10 +1372,12 @@ function connectionRow(c, isAdmin, canTest) {
   const statusText = c.last_test_ok === true ? 'Connected'
     : c.last_test_ok === false ? 'Failing' : 'Untested';
   return `
-    <div class="conn-row" onclick="openConnectionDialog('${c.id}')">
+    <div class="conn-row" role="button" tabindex="0"
+      aria-label="${esc(c.name)} — ${statusText}. Edit connection."
+      onclick="openConnectionDialog('${c.id}')">
       <span class="conn-logo" title="${esc(CONNECTOR_LABELS[c.kind] || c.kind)}">${
         CONNECTOR_LOGOS[c.kind] || ''}</span>
-      <span class="conn-status-dot ${status}" title="${statusText}"></span>
+      <span class="conn-status ${status}"><span class="conn-status-dot"></span>${statusText}</span>
       <div class="conn-main">
         <div class="conn-name">${esc(c.name)}
           ${queue ? `<span class="conn-queue">${esc(queue)}</span>` : ''}</div>
@@ -1507,7 +1575,7 @@ async function testConnection(id) {
 
 // --- users -------------------------------------------------------------------
 
-async function renderUsers() {
+async function renderUsers(token = viewToken) {
   el('view').innerHTML = '<div class="empty">Loading…</div>';
   if (principal.role !== 'admin') {
     el('view').innerHTML = `<div class="pipeline-note">Managing users requires the admin
@@ -1515,6 +1583,7 @@ async function renderUsers() {
     return;
   }
   const data = await (await fetch('/api/users')).json();
+  if (!viewIsCurrent(token)) return;
   const active = data.users.filter(u => u.active).length;
   el('view').innerHTML = `
     <div class="pipeline-note">
@@ -1616,12 +1685,17 @@ async function saveUser(id) {
 
 let toastTimer;
 
-function toast(message) {
+// ok=true is a success/neutral toast; ok=false is an error. Callers already
+// pass the flag — it was simply being ignored, so a failure looked identical to
+// a success. An error also announces itself assertively to a screen reader.
+function toast(message, ok = true) {
   const node = el('toast');
   node.textContent = message;
-  node.classList.add('on');
+  node.classList.remove('ok', 'err');
+  node.classList.add('on', ok ? 'ok' : 'err');
+  node.setAttribute('aria-live', ok ? 'polite' : 'assertive');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('on'), 3200);
+  toastTimer = setTimeout(() => node.classList.remove('on'), ok ? 3200 : 5000);
 }
 
 // --- lightweight dialog -----------------------------------------------------
@@ -1629,9 +1703,9 @@ function toast(message) {
 function showDialog(title, bodyHtml) {
   closeDialog();
   document.body.insertAdjacentHTML('beforeend', `
-    <dialog id="app-dialog">
-      <button class="dialog-close" onclick="closeDialog()">Close</button>
-      <h3>${esc(title)}</h3>
+    <dialog id="app-dialog" aria-labelledby="app-dialog-title">
+      <button class="dialog-close" onclick="closeDialog()" aria-label="Close dialog">Close</button>
+      <h3 id="app-dialog-title">${esc(title)}</h3>
       ${bodyHtml}
     </dialog>`);
   el('app-dialog').showModal();
@@ -1652,7 +1726,7 @@ function renderPlaceholder(view) {
     </div>`;
 }
 
-async function renderAudit() {
+async function renderAudit(token = viewToken) {
   el('view').innerHTML = '<div class="audit-list" id="audit-list"><span class="empty">Loading…</span></div>';
   try {
     const data = await (await fetch('/api/audit?limit=100')).json();
@@ -1724,6 +1798,27 @@ function connect() {
 }
 
 // --- boot -------------------------------------------------------------------
+
+// A container styled as clickable gets keyboard parity: any element with
+// role="button" activates on Enter or Space, so a run row, a connection row and
+// the approval callout behave the way a real button does without each having to
+// wire its own handler.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const target = event.target.closest('[role="button"]');
+  if (!target || target.tagName === 'BUTTON' || target.tagName === 'A') return;
+  event.preventDefault();
+  target.click();
+});
+
+// Escape closes the mobile navigation drawer as well as dialogs.
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && el('app') && el('app').classList.contains('nav-open')) {
+    closeNav();
+    const toggle = el('nav-toggle');
+    if (toggle) toggle.focus();
+  }
+});
 
 (async function boot() {
   syncThemeControls();

@@ -27,6 +27,8 @@
 </head>
 
 <body>
+  <a class="skip-link" href="#view">Skip to main content</a>
+
   <!-- Login gate. Shown until /api/auth/me succeeds. -->
   <div id="login-screen" class="login-screen hidden">
     <button class="theme-toggle login-theme-toggle" type="button" onclick="toggleTheme()"
@@ -35,12 +37,12 @@
       <span data-theme-label>Light</span>
     </button>
     <form class="login-card" id="login-form" onsubmit="doLogin(event)">
-      <div class="brand login-brand">
+      <h1 class="brand login-brand">
         <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
           alt="SignalAIOps" />
         <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
           alt="SignalAIOps" />
-      </div>
+      </h1>
 
       <div class="login-warning hidden" id="bootstrap-note"></div>
 
@@ -54,13 +56,29 @@
       <p class="dialog-note" id="login-hint"></p>
 
       <p><button class="button" type="submit" id="login-submit">Sign in</button></p>
-      <p id="login-status" class="dialog-note"></p>
+      <p id="login-status" class="dialog-note" role="alert" aria-live="assertive"></p>
     </form>
   </div>
 
   <!-- Application shell. Operate above the line, Configure below it. -->
   <div id="app" class="app hidden">
-    <aside class="sidebar">
+    <!-- Mobile top bar: only visible below the drawer breakpoint. -->
+    <div class="mobile-bar">
+      <button class="icon-button nav-toggle" type="button" onclick="toggleNav()"
+        aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"
+        id="nav-toggle">☰</button>
+      <img class="brand-logo brand-logo-dark mobile-logo" src="/static/signalaiops-logo-dark-v3.png"
+        alt="SignalAIOps" />
+      <img class="brand-logo brand-logo-light mobile-logo" src="/static/signalaiops-logo-light-v3.png"
+        alt="SignalAIOps" />
+      <button class="theme-toggle" type="button" onclick="toggleTheme()"
+        data-theme-toggle aria-label="Switch color theme">
+        <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
+      </button>
+    </div>
+    <div class="nav-scrim" id="nav-scrim" onclick="closeNav()" hidden></div>
+
+    <aside class="sidebar" id="sidebar">
       <div class="brand sidebar-brand">
         <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
           alt="SignalAIOps" />
@@ -68,17 +86,16 @@
           alt="SignalAIOps" />
       </div>
 
-      <nav id="nav"></nav>
+      <nav id="nav" aria-label="Primary"></nav>
 
       <div class="sidebar-foot">
         <div id="who" class="who"></div>
-        <button class="button ghost" onclick="doLogout()">Sign out</button>
       </div>
     </aside>
 
     <div class="content">
       <header class="content-head">
-        <h2 id="view-title">Workflows</h2>
+        <h1 id="view-title">Home</h1>
         <div class="header-actions">
           <button class="theme-toggle" type="button" onclick="toggleTheme()"
             data-theme-toggle aria-label="Switch color theme">
@@ -89,11 +106,11 @@
           <span id="conn" class="conn down">connecting…</span>
         </div>
       </header>
-      <main id="view"></main>
+      <main id="view" tabindex="-1"></main>
     </div>
   </div>
 
-  <div id="toast" role="status"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/app.js" defer></script>
 </body>
 

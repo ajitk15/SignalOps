@@ -12,6 +12,9 @@
   --ok: #a3e635;
   --warn: #f59e0b;
   --bad: #fb7185;
+  --btn: #0f766e;
+  --btn-hover: #115e59;
+  --focus: #5eead4;
 }
 
 :root[data-theme="light"] {
@@ -24,9 +27,12 @@
   --muted: #5f6c78;
   --accent: #0f766e;
   --accent-strong: #115e59;
-  --ok: #65a30d;
-  --warn: #d97706;
-  --bad: #dc4660;
+  --ok: #3f6212;
+  --warn: #b45309;
+  --bad: #be123c;
+  --btn: #0f766e;
+  --btn-hover: #115e59;
+  --focus: #0f766e;
 }
 
 * {
@@ -669,19 +675,22 @@ section h2 {
 }
 
 .button {
-  background: var(--accent);
+  background: var(--btn);
   border: 0;
   border-radius: 6px;
-  color: #fff;
-  padding: 7px 10px;
+  color: #ffffff;
+  padding: 8px 12px;
+  min-height: 36px;
   cursor: pointer;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
 }
 
-.button:hover {
-  filter: brightness(1.1);
+.button:hover:not(:disabled) {
+  background: var(--btn-hover);
 }
+
+.button:disabled { opacity: .55; cursor: default; }
 
 .button.danger {
   background: var(--bad);
@@ -1049,27 +1058,6 @@ button.status-pill:hover {
 }
 
 /* --- toast ---------------------------------------------------------- */
-#toast {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--bad);
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-size: 13px;
-  box-shadow: 0 4px 18px #0006;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .3s;
-  max-width: 340px;
-}
-
-#toast.show {
-  opacity: 1;
-}
-
 /* --- agent workflow ------------------------------------------------- */
 .workflow {
   display: flex;
@@ -1206,10 +1194,11 @@ button.status-pill:hover {
 }
 
 .login-brand .brand-logo {
-  width: min(100%, 350px);
-  height: 108px;
-  object-fit: cover;
-  object-position: center;
+  width: auto;
+  max-width: min(100%, 320px);
+  height: auto;
+  max-height: 96px;
+  object-fit: contain;
 }
 
 .login-theme-toggle {
@@ -1280,8 +1269,10 @@ button.status-pill:hover {
 }
 
 .nav-item {
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
+  min-height: 40px;
   text-align: left;
   background: transparent;
   border: 0;
@@ -1289,7 +1280,7 @@ button.status-pill:hover {
   color: var(--muted);
   font: inherit;
   font-size: 13px;
-  padding: 7px 9px;
+  padding: 8px 10px;
   cursor: pointer;
 }
 
@@ -1497,6 +1488,11 @@ button.status-pill:hover {
 }
 
 #toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.ok { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+#toast.err {
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, var(--panel-2));
+}
 
 /* Role picker in the sidebar — the dummy login means role is a UI control,
    not an identity claim, so it belongs where you can reach it. */
@@ -1947,3 +1943,148 @@ button.status-pill:hover {
 .home-run-time { color: var(--muted); flex: none; }
 .home-conn-name { flex: 1; }
 .home-conn .conn-logo .connector-logo { width: 16px; height: 16px; }
+
+/* ===========================================================================
+   QA remediation: accessibility, mobile, contrast, motion
+   =========================================================================== */
+
+/* Skip link — first tab stop, jumps keyboard users past the sidebar. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 8px;
+  z-index: 200;
+  background: var(--btn);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.skip-link:focus { left: 8px; }
+
+/* One consistent, high-contrast focus ring across the app — the browser's 1px
+   black outline was invisible on the dark background. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [role="button"]:focus-visible,
+[tabindex]:focus-visible, .nav-item:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Visible connection status: dot plus a word, not a colour and a tooltip. */
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  flex: none;
+}
+.conn-status .conn-status-dot { width: 8px; height: 8px; }
+.conn-status.on { color: var(--ok); }
+.conn-status.off { color: var(--bad); }
+.conn-status.unknown { color: var(--muted); }
+.conn-status.on .conn-status-dot { background: var(--ok); }
+.conn-status.off .conn-status-dot { background: var(--bad); }
+.conn-status.unknown .conn-status-dot { background: var(--muted); }
+
+/* Touch targets: at least 44px where a finger lands. */
+.theme-toggle { min-height: 36px; }
+.icon-button { min-width: 30px; min-height: 30px; }
+@media (pointer: coarse) {
+  .nav-item { min-height: 44px; }
+  .theme-toggle, .icon-button, .button, .button.small,
+  .link-button, .menu-item { min-height: 44px; }
+  .link-button { display: inline-flex; align-items: center; }
+}
+
+/* A readability floor — nothing below 11px. */
+.field-hint, .dialog-note, .conn-sub, .home-tile-sub, .home-tile-label,
+.tier-badge, .conn-queue, .row-flag, .conn-count, .table-count {
+  font-size: 11px;
+}
+
+/* --- mobile navigation drawer (below 720px) ------------------------------- */
+
+.mobile-bar { display: none; }
+.nav-scrim { display: none; }
+.mobile-logo { height: 26px; width: auto; }
+.nav-toggle { font-size: 18px; }
+
+@media (max-width: 720px) {
+  .app { display: block; }
+
+  .mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 40;
+  }
+  .mobile-bar .mobile-logo:first-of-type { margin-right: auto; }
+  .mobile-bar .brand-logo-light { margin-right: auto; }
+  .mobile-bar .theme-toggle { margin-left: 0; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 260px;
+    max-width: 82vw;
+    transform: translateX(-100%);
+    transition: transform .2s ease;
+    z-index: 60;
+    overflow-y: auto;
+  }
+  .app.nav-open .sidebar { transform: translateX(0); }
+
+  .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .5);
+    z-index: 50;
+  }
+  .nav-scrim[hidden] { display: none; }
+
+  .content { min-width: 0; }
+  .content-head { padding: 12px 16px; }
+  .content-head h1 { font-size: 18px; }
+  main#view { padding: 14px 16px; }
+}
+
+/* Desktop keeps the sidebar in the flow; the mobile bar never shows. */
+@media (min-width: 721px) {
+  .mobile-bar, .nav-scrim { display: none !important; }
+  .sidebar { transform: none !important; }
+}
+
+/* Respect a reduced-motion preference: no slides, fades or flashes. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen-reader-only utility. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
