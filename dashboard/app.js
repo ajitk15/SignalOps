@@ -685,7 +685,7 @@ async function renderHome(token = viewToken) {
         </button>`).join('')}
     </div>
 
-    ${c.pending_approvals ? `<div class="home-callout" role="button" tabindex="0"
+    ${c.pending_approvals ? `<div class="home-callout clickable" role="button" tabindex="0" data-activate
       aria-label="${c.pending_approvals} approval${c.pending_approvals > 1 ? 's' : ''} waiting; go to approvals"
       onclick="switchView('approvals')">
       <i class="ti">⚠</i>
@@ -718,7 +718,7 @@ function homeSimBanner() {
 function homeRunRow(r) {
   const status = RUN_STATUS_CLASS[r.status] || '';
   return `
-    <div class="home-run" role="button" tabindex="0"
+    <div class="home-run clickable" role="button" tabindex="0" data-activate
       aria-label="Run ${esc(r.trigger_ref || r.id.slice(0, 8))}, ${
         esc(RUN_STATUS_LABEL[r.status] || r.status)}" onclick="showRun('${r.id}')">
       <span class="home-run-ref">${esc(r.trigger_ref || r.id.slice(0, 8))}</span>
@@ -791,25 +791,30 @@ async function renderWorkflows(token = viewToken) {
 
 function workflowCard(w, canRun) {
   return `
-    <div class="agent-item">
-      <div class="agent-top">
-        <strong>${esc(w.name)}</strong>
-        <span class="tier-badge">${esc(w.template.replace(/_/g, ' '))}</span>
-        <span class="tier-badge ${w.enabled ? 'ok' : ''}">${w.enabled ? 'enabled' : 'not enabled'}</span>
-        ${w.config.dry_run ? '<span class="tier-badge">dry run</span>' : ''}
-        ${w.polling ? '<span class="tier-badge warn">polling</span>' : ''}
+    <div class="wf-card">
+      <div class="wf-main">
+        <div class="wf-title">
+          <strong>${esc(w.name)}</strong>
+          <span class="tier-badge ${w.enabled ? 'ok' : ''}">${w.enabled ? 'enabled' : 'off'}</span>
+          ${w.polling ? '<span class="tier-badge warn">polling</span>' : ''}
+        </div>
+        <div class="wf-meta">
+          <span>${esc(w.template.replace(/_/g, ' '))}</span>
+          <span>·</span>
+          <span>${w.config.dry_run ? 'dry run' : 'live writes'}</span>
+          <span>·</span>
+          <span>$${(w.config.run_budget_usd ?? 1).toFixed(2)}/run</span>
+          ${w.tested ? '' : '<span>·</span><span class="wf-warn">never tested</span>'}
+        </div>
       </div>
-      <p class="agent-purpose">Budget $${(w.config.run_budget_usd ?? 1).toFixed(2)} per run.
-        ${w.config.dry_run ? 'External writes are recorded, not sent.'
-          : 'External writes are live.'}
-        ${w.tested ? '' : ' Never test-run.'}</p>
-      <div class="row-actions">
-        <button class="button ghost" onclick="resumeWizard('${w.id}')">Set up</button>
+      <div class="wf-actions">
         <button class="button" onclick="openRunDialog('${w.id}')" ${canRun ? '' : 'disabled'}
           title="${canRun ? 'Start a run' : 'Starting a run requires the operator role'}">
-          Start a run</button>
-        <button class="button ghost" onclick="exportWorkflow('${w.id}')"
-          ${w.exportable ? '' : 'disabled'}>Download standalone app</button>
+          Run</button>
+        <button class="button ghost small" onclick="resumeWizard('${w.id}')">Set up</button>
+        <button class="button ghost small" onclick="exportWorkflow('${w.id}')"
+          ${w.exportable ? '' : 'disabled'} title="Download as a standalone Python app">
+          Download</button>
       </div>
     </div>`;
 }
@@ -911,29 +916,52 @@ async function renderRuns(token = viewToken) {
     return;
   }
   if (!viewIsCurrent(token)) return;
-  el('view').innerHTML = data.runs.length ? `
-    <div class="pipeline-note">Every step is recorded as it happens, so a run that fails
-      part way is still legible afterwards rather than a gap.</div>
-    ${data.runs.map(runRow).join('')}`
-    : '<div class="empty">No runs yet. Start one from Workflows.</div>';
+  if (!data.runs.length) {
+    el('view').innerHTML = '<div class="empty">No runs yet. Start one from Workflows.</div>';
+    return;
+  }
+  const active = data.runs.filter(
+    r => ['running', 'awaiting_approval', 'pending'].includes(r.status)).length;
+  el('view').innerHTML = `
+    <div class="table-head">
+      <span class="table-count">${data.runs.length} runs · ${active} active</span>
+    </div>
+    <div class="table-scroll">
+    <table class="data-table">
+      <thead><tr>
+        <th class="col-status">Status</th><th>Incident</th><th>Mode</th>
+        <th>Started</th><th class="num">Duration</th><th class="num">Cost</th><th></th>
+      </tr></thead>
+      <tbody>${data.runs.map(runRow).join('')}</tbody>
+    </table>
+    </div>`;
+}
+
+function _runDuration(run) {
+  if (!run.finished_at) return run.status === 'awaiting_approval' ? 'paused' : '—';
+  const s = Math.max(0, run.finished_at - run.started_at);
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
 function runRow(run) {
   const status = RUN_STATUS_CLASS[run.status] || '';
+  const when = new Date(run.started_at * 1000);
+  const today = when.toDateString() === new Date().toDateString();
   return `
-    <div class="agent-item">
-      <div class="agent-top">
-        <strong class="incident-id">${esc(run.trigger_ref || run.id.slice(0, 8))}</strong>
-        <span class="tier-badge ${status}">${esc(run.status.replace(/_/g, ' '))}</span>
-        ${run.dry_run ? '<span class="tier-badge">dry run</span>' : ''}
-        <span class="audit-time">${new Date(run.started_at * 1000).toLocaleString()}</span>
-      </div>
-      ${run.error ? `<p class="agent-purpose">${esc(run.error)}</p>` : ''}
-      <div class="row-actions">
-        <button class="button ghost" onclick="showRun('${run.id}')">Timeline</button>
-        <span class="dialog-note">$${(run.cost_usd || 0).toFixed(4)}</span>
-      </div>
-    </div>`;
+    <tr class="clickable" role="button" tabindex="0" data-activate onclick="showRun('${run.id}')">
+      <td class="col-status"><span class="tier-badge ${status}">${
+        esc(RUN_STATUS_LABEL[run.status] || run.status)}</span></td>
+      <td class="incident-id">${esc(run.trigger_ref || run.id.slice(0, 8))}${
+        run.error ? ` <span class="row-flag bad" title="${esc(run.error)}">error</span>` : ''}</td>
+      <td class="muted">${run.dry_run ? 'dry run' : 'live'}</td>
+      <td class="muted">${today
+        ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : when.toLocaleDateString()}</td>
+      <td class="num muted">${_runDuration(run)}</td>
+      <td class="num muted">$${(run.cost_usd || 0).toFixed(4)}</td>
+      <td class="col-action"><button class="button ghost small"
+        onclick="event.stopPropagation(); showRun('${run.id}')">Timeline</button></td>
+    </tr>`;
 }
 
 async function showRun(runId) {
@@ -968,13 +996,12 @@ async function renderApprovals(token = viewToken) {
   }
   if (!viewIsCurrent(token)) return;
   el('view').innerHTML = `
-    <div class="pipeline-note">
-      An approval is bound to a hash of the exact plan it was shown. If the plan changes
-      afterwards the decision does not carry over — you are asked again rather than having
-      approved something you never saw.
-      ${data.can_decide ? '' : `<br /><strong>You are signed in as ${esc(principal.role)}</strong>,
-        which can see this queue but not act on it. An admin can change your role under Users.`}
+    <div class="table-head">
+      <span class="table-count">${data.approvals.length} waiting on a human</span>
     </div>
+    ${data.can_decide ? '' : `<div class="pipeline-note">You are signed in as
+      <strong>${esc(principal.role)}</strong> and can see this queue but not act on it.
+      An admin can change your role under Users.</div>`}
     ${data.approvals.length ? data.approvals.map(a => approvalCard(a, data.can_decide)).join('')
       : '<div class="empty">Nothing is waiting on a human.</div>'}`;
 }
@@ -992,38 +1019,53 @@ const GATE_COPY = {
                             no: 'What happened?' } },
 };
 
+const RISK_TONE = { low: 'ok', medium: 'warn', high: 'bad' };
+
 function approvalCard(approval, canDecide) {
   const copy = GATE_COPY[approval.node] || GATE_COPY.gate;
-  const plan = (approval.payload && approval.payload.plan) || {};
-  const diagnosis = (approval.payload && approval.payload.diagnosis) || {};
+  const payload = approval.payload || {};
+  const plan = payload.plan || {};
+  const diagnosis = payload.diagnosis || {};
   const steps = plan.steps || [];
   const awaitingReport = approval.node === 'hand_off';
+  const confidence = diagnosis.confidence != null ? Math.round(diagnosis.confidence * 100) : null;
   return `
-    <div class="agent-item">
-      <div class="agent-top">
+    <div class="appr-card">
+      <div class="appr-head">
         <strong>${esc(approval.summary)}</strong>
-        ${awaitingReport ? '<span class="tier-badge warn">awaiting your report</span>' : ''}
-        ${approval.payload && approval.payload.simulated
-          ? '<span class="tier-badge warn">simulated</span>' : ''}
+        <div class="appr-chips">
+          ${plan.risk ? `<span class="tier-badge ${RISK_TONE[plan.risk] || ''}">${
+            esc(plan.risk)} risk</span>` : ''}
+          ${confidence != null ? `<span class="tier-badge">${confidence}% confident</span>` : ''}
+          ${steps.length ? `<span class="tier-badge">${steps.length} step${
+            steps.length > 1 ? 's' : ''}</span>` : ''}
+          ${plan.requires_downtime ? '<span class="tier-badge bad">downtime</span>' : ''}
+          ${awaitingReport ? '<span class="tier-badge warn">awaiting report</span>' : ''}
+          ${payload.simulated ? '<span class="tier-badge warn">simulated</span>' : ''}
+        </div>
       </div>
-      ${diagnosis.root_cause ? `<p class="agent-purpose"><strong>Cause:</strong>
-        ${esc(diagnosis.root_cause)}
-        (${Math.round((diagnosis.confidence || 0) * 100)}% confident)</p>` : ''}
-      ${awaitingReport ? `<p class="agent-purpose">This plan was approved. Run the steps,
-        then say what happened — the ticket is only resolved if you report success.</p>` : ''}
-      <ol class="plan-steps">
-        ${steps.map(step => `<li><strong>${esc(step.action || '')}</strong>
-          <br /><span class="dialog-note">verify: ${esc(step.verify || '')}</span>
-          <br /><span class="dialog-note">rollback: ${esc(step.rollback || '')}</span></li>`).join('')}
-      </ol>
-      <p class="dialog-note">Pinned to ${esc(approval.payload_hash.slice(0, 12))}…</p>
-      <div class="row-actions">
-        <button class="button" onclick="decide('${approval.id}', true, '${approval.node}')"
-          ${canDecide ? '' : 'disabled'}
-          title="${canDecide ? esc(copy.ask) : 'Deciding requires the approver role'}">
-          ${esc(copy.yes)}</button>
-        <button class="button ghost" onclick="decide('${approval.id}', false, '${approval.node}')"
-          ${canDecide ? '' : 'disabled'}>${esc(copy.no)}</button>
+      ${diagnosis.root_cause ? `<p class="appr-cause"><span class="appr-label">Cause</span>
+        ${esc(diagnosis.root_cause)}</p>` : ''}
+      ${awaitingReport ? `<p class="appr-note">Approved — run the steps, then report the
+        outcome. The ticket is resolved only if you confirm success.</p>` : ''}
+      ${steps.length ? `<ol class="appr-steps">
+        ${steps.map(step => `<li>
+          <span class="appr-step-action">${esc(step.action || '')}</span>
+          ${step.verify ? `<span class="appr-step-aside">verify: ${esc(step.verify)}</span>` : ''}
+          ${step.rollback ? `<span class="appr-step-aside">rollback: ${esc(step.rollback)}</span>` : ''}
+        </li>`).join('')}
+      </ol>` : ''}
+      <div class="appr-foot">
+        <span class="appr-hash" title="Your approval is bound to this exact plan">🔒 ${
+          esc(approval.payload_hash.slice(0, 10))}…</span>
+        <div class="appr-actions">
+          <button class="button" onclick="decide('${approval.id}', true, '${approval.node}')"
+            ${canDecide ? '' : 'disabled'}
+            title="${canDecide ? esc(copy.ask) : 'Deciding requires the approver role'}">
+            ${esc(copy.yes)}</button>
+          <button class="button ghost" onclick="decide('${approval.id}', false, '${approval.node}')"
+            ${canDecide ? '' : 'disabled'}>${esc(copy.no)}</button>
+        </div>
       </div>
     </div>`;
 }
@@ -1372,7 +1414,7 @@ function connectionRow(c, isAdmin, canTest) {
   const statusText = c.last_test_ok === true ? 'Connected'
     : c.last_test_ok === false ? 'Failing' : 'Untested';
   return `
-    <div class="conn-row" role="button" tabindex="0"
+    <div class="conn-row clickable" role="button" tabindex="0" data-activate
       aria-label="${esc(c.name)} — ${statusText}. Edit connection."
       onclick="openConnectionDialog('${c.id}')">
       <span class="conn-logo" title="${esc(CONNECTOR_LABELS[c.kind] || c.kind)}">${
@@ -1813,10 +1855,22 @@ document.addEventListener('keydown', (event) => {
 
 // Escape closes the mobile navigation drawer as well as dialogs.
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && el('app') && el('app').classList.contains('nav-open')) {
-    closeNav();
-    const toggle = el('nav-toggle');
-    if (toggle) toggle.focus();
+  // Enter or Space activates a role="button" container (run rows, home tiles,
+  // connection rows) exactly as a real button would.
+  if ((event.key === 'Enter' || event.key === ' ') &&
+      event.target instanceof HTMLElement && event.target.matches('[data-activate]')) {
+    event.preventDefault();
+    event.target.click();
+    return;
+  }
+  if (event.key === 'Escape') {
+    const menu = el('add-menu');
+    if (menu && !menu.classList.contains('hidden')) { closeAddMenu(); return; }
+    if (el('app') && el('app').classList.contains('nav-open')) {
+      closeNav();
+      const toggle = el('nav-toggle');
+      if (toggle) toggle.focus();
+    }
   }
 });
 
