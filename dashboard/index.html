@@ -3,25 +3,43 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>SignalOps</title>
+  <title>SignalAIOps</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="icon" type="image/svg+xml"
-    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1.5' y='1.5' width='29' height='29' rx='7' fill='%230b0e14' stroke='%235b8cff' stroke-width='2'/%3E%3Cpolyline points='7 21 11 21 13 16 17 24 20 10 22 15' fill='none' stroke='%235b8cff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='24.5' cy='11' r='2.2' fill='%233ddc84'/%3E%3C/svg%3E" />
+  <meta name="color-scheme" content="dark light" />
+  <meta id="theme-color" name="theme-color" content="#0b1420" />
+  <script>
+    (() => {
+      const key = "signalaiops-theme";
+      let theme = "dark";
+      try {
+        theme = localStorage.getItem(key)
+          || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+      } catch {
+        theme = "dark";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <link rel="icon" type="image/png" sizes="512x512"
+    href="/static/signalaiops-favicon-v3.png" />
+  <link rel="apple-touch-icon" href="/static/signalaiops-favicon-v3.png" />
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 
 <body>
   <!-- Login gate. Shown until /api/auth/me succeeds. -->
   <div id="login-screen" class="login-screen hidden">
+    <button class="theme-toggle login-theme-toggle" type="button" onclick="toggleTheme()"
+      data-theme-toggle aria-label="Switch color theme">
+      <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
+      <span data-theme-label>Light</span>
+    </button>
     <form class="login-card" id="login-form" onsubmit="doLogin(event)">
       <div class="brand login-brand">
-        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-          <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
-          <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
-            stroke-linecap="round" stroke-linejoin="round" />
-          <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
-        </svg>
-        <h1>Signal<span class="ops">Ops</span></h1>
+        <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+          alt="SignalAIOps" />
+        <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+          alt="SignalAIOps" />
       </div>
 
       <div class="login-warning hidden" id="bootstrap-note"></div>
@@ -44,13 +62,10 @@
   <div id="app" class="app hidden">
     <aside class="sidebar">
       <div class="brand sidebar-brand">
-        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
-          <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="var(--accent)" stroke-width="2" />
-          <polyline points="7 21 11 21 13 16 17 24 20 10 22 15" fill="none" stroke="var(--accent)" stroke-width="2.2"
-            stroke-linecap="round" stroke-linejoin="round" />
-          <circle cx="24.5" cy="11" r="2.2" fill="var(--ok)" />
-        </svg>
-        <h1>Signal<span class="ops">Ops</span></h1>
+        <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
+          alt="SignalAIOps" />
+        <img class="brand-logo brand-logo-light" src="/static/signalaiops-logo-light-v3.png"
+          alt="SignalAIOps" />
       </div>
 
       <nav id="nav"></nav>
@@ -65,6 +80,11 @@
       <header class="content-head">
         <h2 id="view-title">Workflows</h2>
         <div class="header-actions">
+          <button class="theme-toggle" type="button" onclick="toggleTheme()"
+            data-theme-toggle aria-label="Switch color theme">
+            <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
+            <span data-theme-label>Light</span>
+          </button>
           <span id="killswitch-pill" class="status-pill hidden"></span>
           <span id="conn" class="conn down">connecting…</span>
         </div>

@@ -64,9 +64,15 @@ if ENV != "local" and not provider().verifies_identity:
         "identity. Refusing to start until a real AuthProvider is configured."
     )
 
-app = FastAPI(title="SignalOps")
+app = FastAPI(title="SignalAIOps")
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
-STATIC_FILES = {"app.css", "app.js"}
+STATIC_FILES = {
+    "app.css",
+    "app.js",
+    "signalaiops-favicon-v3.png",
+    "signalaiops-logo-dark-v3.png",
+    "signalaiops-logo-light-v3.png",
+}
 WORKSPACE_ID = init_db()
 
 

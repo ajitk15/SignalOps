@@ -1,4 +1,4 @@
-// SignalOps v2 client shell.
+// SignalAIOps v2 client shell.
 // Phase 0b: login gate, sidebar navigation, live socket. The views themselves
 // are placeholders until the phases that build them.
 
@@ -8,6 +8,37 @@ const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
 
 let principal = null;
 let currentView = 'home';
+
+const THEME_KEY = 'signalaiops-theme';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+}
+
+function syncThemeControls() {
+  const theme = currentTheme();
+  const next = theme === 'dark' ? 'light' : 'dark';
+  document.querySelectorAll('[data-theme-toggle]').forEach(button => {
+    button.setAttribute('aria-label', `Switch to ${next} mode`);
+    button.title = `Switch to ${next} mode`;
+    const icon = button.querySelector('[data-theme-icon]');
+    const label = button.querySelector('[data-theme-label]');
+    if (icon) icon.textContent = theme === 'dark' ? '☀' : '☾';
+    if (label) label.textContent = theme === 'dark' ? 'Light' : 'Dark';
+  });
+  const themeColor = el('theme-color');
+  if (themeColor) themeColor.content = theme === 'dark' ? '#0b1420' : '#f4f7f5';
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* preference remains in-memory */ }
+  syncThemeControls();
+}
+
+function toggleTheme() {
+  setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+}
 
 // Operate is what you do; Configure is how it behaves. Keeping them apart is
 // the whole point of the sidebar — an on-call user and someone tuning an agent
@@ -303,7 +334,7 @@ async function wizardConnect() {
     </div>`).join('');
   el('wizard-body').innerHTML = `
     <h3>Connect ServiceNow</h3>
-    <p class="agent-purpose">SignalOps reads credentials from the environment and never
+    <p class="agent-purpose">SignalAIOps reads credentials from the environment and never
       stores them. There is no field here to type a password into — set these where the
       server runs, then test.</p>
     ${rows}
@@ -570,7 +601,7 @@ async function renderHome() {
     el('view').innerHTML = `
       <div class="home-welcome">
         <h2>${greeting()}, ${esc(d.greeting_name)}.</h2>
-        <p>Welcome to SignalOps. It watches a ServiceNow queue, diagnoses the incidents
+        <p>Welcome to SignalAIOps. It watches a ServiceNow queue, diagnoses the incidents
           that land there, and proposes fixes for you to approve — nothing acts on its own.</p>
         <p class="home-steps-label">Two steps to your first workflow:</p>
         <ol class="home-steps">
@@ -1695,6 +1726,7 @@ function connect() {
 // --- boot -------------------------------------------------------------------
 
 (async function boot() {
+  syncThemeControls();
   try {
     const response = await fetch('/api/auth/me');
     if (response.ok) { principal = await response.json(); return showApp(); }

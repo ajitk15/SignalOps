@@ -1,26 +1,32 @@
-:root {
-  --bg: #0b0e14;
-  --panel: #131826;
-  --panel-2: #1a2133;
-  --border: #263049;
-  --text: #e6e9f0;
-  --muted: #8b93a7;
-  --accent: #5b8cff;
-  --ok: #3ddc84;
-  --warn: #ffb020;
-  --bad: #ff5c5c;
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1420;
+  --panel: #111d2b;
+  --panel-2: #182739;
+  --border: #294055;
+  --text: #fffaf0;
+  --muted: #9caaba;
+  --accent: #14b8a6;
+  --accent-strong: #0d9488;
+  --ok: #a3e635;
+  --warn: #f59e0b;
+  --bad: #fb7185;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f5f6fa;
-    --panel: #fff;
-    --panel-2: #f0f2f8;
-    --border: #e1e4ee;
-    --text: #1a1e2b;
-    --muted: #5b6376;
-    --accent: #3b62d6;
-  }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f7f5;
+  --panel: #ffffff;
+  --panel-2: #eaf3f0;
+  --border: #cadbd5;
+  --text: #172033;
+  --muted: #5f6c78;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --ok: #65a30d;
+  --warn: #d97706;
+  --bad: #dc4660;
 }
 
 * {
@@ -32,6 +38,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 
 header {
@@ -51,25 +58,66 @@ header h1 {
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  min-width: 0;
 }
 
-.brand .logo {
-  width: 26px;
-  height: 26px;
-  flex: none;
+.brand-logo {
+  display: block;
+  height: auto;
+  max-width: 100%;
 }
 
-/* "Signal" reads as text, "Ops" carries the accent — set in renderBrand()
-   so a configured title still renders sensibly. */
-.brand h1 .ops {
-  color: var(--accent);
+.brand-logo-light {
+  display: none;
+}
+
+:root[data-theme="light"] .brand-logo-dark {
+  display: none;
+}
+
+:root[data-theme="light"] .brand-logo-light {
+  display: block;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font: 600 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.theme-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--warn);
+  font-size: 15px;
 }
 
 .tabs {
@@ -1136,6 +1184,10 @@ button.status-pill:hover {
   display: grid;
   place-items: center;
   padding: 24px;
+  position: relative;
+  background:
+    radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 34%),
+    var(--bg);
 }
 
 .login-card {
@@ -1150,10 +1202,21 @@ button.status-pill:hover {
 .login-brand {
   justify-content: center;
   margin-bottom: 20px;
+  overflow: hidden;
 }
 
-.login-brand .logo { width: 30px; height: 30px; }
-.login-brand h1 { font-size: 20px; }
+.login-brand .brand-logo {
+  width: min(100%, 350px);
+  height: 108px;
+  object-fit: cover;
+  object-position: center;
+}
+
+.login-theme-toggle {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+}
 
 /* The weakest part of the system says so, prominently and in the user's path. */
 .login-warning {
@@ -1192,9 +1255,19 @@ button.status-pill:hover {
   gap: 22px;
 }
 
-.sidebar-brand { padding: 0 6px; }
-.sidebar-brand .logo { width: 24px; height: 24px; }
-.sidebar-brand h1 { font-size: 16px; }
+.sidebar-brand {
+  height: 62px;
+  padding: 0 2px;
+  overflow: hidden;
+}
+
+.sidebar-brand .brand-logo {
+  width: 100%;
+  max-width: 196px;
+  height: 62px;
+  object-fit: cover;
+  object-position: center;
+}
 
 .nav-group + .nav-group { margin-top: 18px; }
 
@@ -1277,6 +1350,14 @@ button.status-pill:hover {
 @media (max-width: 720px) {
   .app { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
+  .sidebar-brand,
+  .sidebar-brand .brand-logo { height: 56px; }
+  .sidebar-brand .brand-logo { max-width: 180px; }
+}
+
+@media (max-width: 520px) {
+  .theme-toggle [data-theme-label] { display: none; }
+  .theme-toggle { padding: 6px 8px; }
 }
 
 /* --- agent catalogue --- */
