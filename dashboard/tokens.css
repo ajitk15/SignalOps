@@ -1,0 +1,78 @@
+/* tokens.css — the single source of truth for SignalAIOps surfaces.
+ *
+ * Both the marketing landing page (landing.html + landing.css) and the console
+ * (index.html + app.css) link this file *before* their own stylesheet. Neither
+ * page defines a colour of its own: they consume these tokens. That is the only
+ * way to guarantee the brand stays identical as a person moves
+ * landing -> login -> app, which is exactly where the two palettes had drifted
+ * ~4-6% apart before this file existed. */
+
+/* Self-hosted so the pages stay fully offline — no third-party font CDN. */
+@font-face {
+  font-family: "InterVariable";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/static/InterVariable.woff2") format("woff2-variations");
+}
+
+/* Typography scale — theme-independent, shared by both surfaces.
+ * A 12px (.75rem) floor for the smallest supporting text; body lands at
+ * 15-17px; display steps climb with the viewport via clamp(). */
+:root {
+  --font-sans: "InterVariable", Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+
+  --fs-caption: .75rem;    /* 12px — floor for labels, meta, chips */
+  --fs-small: .8125rem;    /* 13px */
+  --fs-body: .9375rem;     /* 15px — base body */
+  --fs-body-lg: 1.0625rem; /* 17px — lede / prominent body */
+  --fs-h3: clamp(1.25rem, 2.4vw, 1.75rem);
+  --fs-h2: clamp(2rem, 4vw, 3.25rem);
+  --fs-display: clamp(3rem, 5.5vw, 5.25rem);
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+  --fw-heavy: 800;
+}
+
+/* Colour palette — dark is the default. */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1420;
+  --panel: #111d2b;
+  --panel-2: #182739;
+  --border: #294055;
+  --text: #fffaf0;
+  --muted: #9caaba;
+  --accent: #14b8a6;
+  --accent-strong: #0d9488;
+  --ok: #a3e635;
+  --warn: #f59e0b;
+  --bad: #fb7185;
+  --btn: #0f766e;
+  --btn-hover: #115e59;
+  --focus: #5eead4;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f7f5;
+  --panel: #ffffff;
+  --panel-2: #eaf3f0;
+  --border: #cadbd5;
+  --text: #172033;
+  --muted: #5f6c78;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  --ok: #3f6212;
+  --warn: #b45309;
+  --bad: #be123c;
+  --btn: #0f766e;
+  --btn-hover: #115e59;
+  --focus: #0f766e;
+}

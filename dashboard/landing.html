@@ -21,10 +21,26 @@
   <meta name="twitter:image" content="https://signalaiops.com/static/og.png" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark light" />
-  <meta name="theme-color" content="#07131e" />
+  <meta id="theme-color" name="theme-color" content="#0b1420" />
+  <script>
+    (() => {
+      const key = "signalaiops-theme";
+      let theme = "dark";
+      try {
+        theme = localStorage.getItem(key)
+          || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+      } catch {
+        theme = "dark";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <link rel="icon" type="image/png" sizes="512x512"
     href="/static/signalaiops-favicon-v3.png" />
   <link rel="apple-touch-icon" href="/static/signalaiops-favicon-v3.png" />
+  <link rel="preload" href="/static/InterVariable.woff2" as="font" type="font/woff2"
+    crossorigin />
+  <link rel="stylesheet" href="/static/tokens.css" />
   <link rel="stylesheet" href="/static/landing.css" />
 </head>
 
@@ -43,7 +59,13 @@
       <a href="#workflow">How it works</a>
       <a href="#safety">Safety</a>
     </nav>
-    <a class="nav-signin" href="/login">Sign in <span aria-hidden="true">↗</span></a>
+    <div class="header-actions">
+      <button class="theme-toggle" type="button" onclick="toggleTheme()"
+        data-theme-toggle aria-label="Switch color theme">
+        <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
+      </button>
+      <a class="nav-signin" href="/login">Sign in <span aria-hidden="true">↗</span></a>
+    </div>
   </header>
 
   <main id="main">
@@ -278,6 +300,43 @@
     <p>Explainable AI operations. Governed from signal to resolution.</p>
     <a href="/login">Sign in</a>
   </footer>
+
+  <script>
+    // Mirrors the console's theme handling (app.js) so a person's choice
+    // carries across the marketing page, the login screen, and the app — they
+    // share the same localStorage key.
+    (() => {
+      const KEY = "signalaiops-theme";
+      const meta = document.getElementById("theme-color");
+      const current = () =>
+        document.documentElement.dataset.theme === "light" ? "light" : "dark";
+
+      function sync() {
+        const theme = current();
+        const next = theme === "dark" ? "light" : "dark";
+        document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+          button.setAttribute("aria-label", `Switch to ${next} mode`);
+          button.title = `Switch to ${next} mode`;
+          const icon = button.querySelector("[data-theme-icon]");
+          if (icon) icon.textContent = theme === "dark" ? "☀" : "☾";
+        });
+        if (meta) meta.content = theme === "dark" ? "#0b1420" : "#f4f7f5";
+      }
+
+      window.toggleTheme = function toggleTheme() {
+        const theme = current() === "dark" ? "light" : "dark";
+        document.documentElement.dataset.theme = theme;
+        try {
+          localStorage.setItem(KEY, theme);
+        } catch {
+          /* preference remains in-memory */
+        }
+        sync();
+      };
+
+      sync();
+    })();
+  </script>
 </body>
 
 </html>

@@ -79,7 +79,9 @@ DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
 STATIC_FILES = {
     "app.css",
     "app.js",
+    "tokens.css",
     "landing.css",
+    "InterVariable.woff2",
     "og.png",
     "signalaiops-favicon-v3.png",
     "signalaiops-logo-dark-v3.png",
