@@ -1148,7 +1148,12 @@ button.status-pill:hover {
   width: min(1180px, 100%);
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(380px, .75fr);
-  align-items: stretch;
+  /* start, not stretch: stretching the aspect-ratio visual panel to match the
+   * form height makes it derive a wider-than-its-track width and overlap the
+   * form. Top-aligning keeps the panel at its natural size (its aspect-ratio
+   * matches the image, so no crop) and lets each form size to its content, so
+   * sign-in and request-access stay visually consistent. */
+  align-items: start;
   gap: clamp(24px, 4vw, 58px);
 }
 
@@ -1311,8 +1316,9 @@ button.status-pill:hover {
 .login-card {
   width: 100%;
   max-width: none;
-  height: 100%;
-  min-height: 0;
+  /* Height follows content; the panel no longer dictates it (see .login-layout),
+   * so every form — sign-in, request access, reset — sizes to its own fields. */
+  height: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -1322,7 +1328,6 @@ button.status-pill:hover {
   border-radius: 18px;
   padding: clamp(24px, 3vw, 34px);
   box-shadow: 0 24px 58px rgba(0, 0, 0, .18);
-  overflow-y: auto;
 }
 
 .login-brand {
