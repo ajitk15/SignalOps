@@ -36,7 +36,11 @@
       data-theme-toggle aria-label="Switch color theme">
       <span class="theme-icon" data-theme-icon aria-hidden="true">☀</span>
     </button>
-    <div class="login-layout">
+    <div class="login-shell">
+      <a class="login-back-link" href="/">
+        <span aria-hidden="true">←</span> Back to product
+      </a>
+      <div class="login-layout">
       <section class="login-visual-panel" aria-label="SignalAIOps autonomous incident response">
         <div class="login-panel-orbits" aria-hidden="true"><i></i><i></i><i></i></div>
 
@@ -89,10 +93,6 @@
       </section>
 
       <div class="login-form-column">
-        <a class="login-back-link" href="/">
-          <span aria-hidden="true">←</span> Back to product
-        </a>
-
         <form class="login-card" id="login-form" onsubmit="doLogin(event)">
           <h1 class="brand login-brand">
             <img class="brand-logo brand-logo-dark" src="/static/signalaiops-logo-dark-v3.png"
@@ -223,6 +223,7 @@
           <p id="reset-password-status" class="dialog-note" role="alert"
             aria-live="assertive"></p>
         </form>
+      </div>
       </div>
     </div>
   </div>

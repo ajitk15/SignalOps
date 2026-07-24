@@ -1144,16 +1144,30 @@ button.status-pill:hover {
     var(--bg);
 }
 
-.login-layout {
+/* One elevated card holding both halves. The back link sits above it in
+ * .login-shell so the card can clip its two halves to the rounded corners. */
+.login-shell {
   width: min(1180px, 100%);
+  display: flex;
+  flex-direction: column;
+}
+
+.login-layout {
+  width: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(380px, .75fr);
   /* stretch is safe now that the visual panel is a CSS flex column with no
-   * aspect-ratio: it simply fills the row height at its track width, giving an
-   * equal-height split for every form (the old raster panel had an
-   * aspect-ratio that derived an oversized width from the stretched height). */
+   * aspect-ratio: it fills the row height at its track width, giving an
+   * equal-height split for every form. */
   align-items: stretch;
-  gap: clamp(24px, 4vw, 58px);
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow:
+    0 34px 80px rgba(0, 0, 0, .32),
+    0 0 70px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 /* CSS/token brand panel — echoes the landing "signal river" so login and
@@ -1169,15 +1183,13 @@ button.status-pill:hover {
   overflow: hidden;
   isolation: isolate;
   padding: clamp(28px, 3vw, 44px);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: 20px;
+  /* Inner half of the unified card — no border/radius of its own; the seam is
+   * a single divider between it and the form. */
+  border-right: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
   background:
     radial-gradient(circle at 18% 12%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 42%),
     radial-gradient(circle at 88% 90%, color-mix(in srgb, var(--warn) 8%, transparent), transparent 34%),
     linear-gradient(150deg, var(--panel-2), var(--panel));
-  box-shadow:
-    0 32px 75px rgba(0, 0, 0, .3),
-    0 0 65px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .login-panel-orbits,
@@ -1343,14 +1355,12 @@ button.status-pill:hover {
 }
 
 .login-back-link {
-  position: absolute;
-  top: -36px;
-  left: 2px;
+  align-self: flex-start;
   width: fit-content;
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin: 0;
+  margin: 0 0 14px 4px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -1380,12 +1390,12 @@ button.status-pill:hover {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  background:
-    linear-gradient(145deg, color-mix(in srgb, var(--panel) 96%, var(--accent) 4%), var(--panel));
-  border: 1px solid color-mix(in srgb, var(--border) 78%, var(--accent));
-  border-radius: 18px;
-  padding: clamp(24px, 3vw, 34px);
-  box-shadow: 0 24px 58px rgba(0, 0, 0, .18);
+  /* Right half of the unified card — the card provides the surface/border. */
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: clamp(28px, 3vw, 44px);
+  box-shadow: none;
 }
 
 .login-brand {
@@ -1491,8 +1501,11 @@ button.status-pill:hover {
     padding: 72px 24px 32px;
   }
 
-  .login-layout {
+  .login-shell {
     width: min(460px, 100%);
+  }
+
+  .login-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1512,16 +1525,8 @@ button.status-pill:hover {
     padding: 68px 16px 24px;
   }
 
-  .login-back-link {
-    top: -34px;
-    left: 2px;
-  }
-
   .login-card {
-    height: auto;
-    min-height: 0;
-    padding: 22px 20px;
-    overflow-y: visible;
+    padding: 26px 22px;
   }
 
   .login-theme-toggle {
