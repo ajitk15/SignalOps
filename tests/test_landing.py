@@ -37,10 +37,14 @@ class LandingPageTests(unittest.TestCase):
         self.assertIn('id="login-form"', response.text)
         self.assertIn('id="app"', response.text)
         self.assertIn('class="login-visual-panel"', response.text)
-        self.assertIn('class="login-process-motion"', response.text)
-        self.assertIn('class="process-arrow process-arrow-one"', response.text)
-        self.assertIn('class="process-arrow process-arrow-two"', response.text)
-        self.assertIn('src="/static/og.png"', response.text)
+        # The CSS brand panel (no raster image) echoes the landing flow.
+        self.assertIn("From signal to", response.text)
+        self.assertIn('class="login-flow"', response.text)
+        for step in ("<strong>Detect</strong>", "<strong>Diagnose</strong>",
+                     "<strong>Approve</strong>", "<strong>Resolve</strong>"):
+            self.assertIn(step, response.text)
+        # The heavy social-share image is no longer loaded on the login path.
+        self.assertNotIn("/static/og.png", response.text)
         self.assertIn('id="forgot-password-form"', response.text)
         self.assertIn('id="reset-password-form"', response.text)
         self.assertNotIn("data-theme-label", response.text)

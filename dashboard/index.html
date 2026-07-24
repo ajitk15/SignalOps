@@ -38,18 +38,54 @@
     </button>
     <div class="login-layout">
       <section class="login-visual-panel" aria-label="SignalAIOps autonomous incident response">
-        <div class="login-image-surface">
-          <img src="/static/og.png"
-            alt="SignalAIOps turns a detected production signal into an AI diagnosis and a human-approved resolution." />
-          <div class="login-process-motion" aria-hidden="true">
-            <span class="process-route"></span>
-            <i class="process-token"></i>
-            <i class="process-token"></i>
-            <i class="process-token"></i>
-            <span class="process-arrow process-arrow-one"></span>
-            <span class="process-arrow process-arrow-two"></span>
-          </div>
+        <div class="login-panel-orbits" aria-hidden="true"><i></i><i></i><i></i></div>
+
+        <div class="login-panel-head">
+          <img class="brand-logo brand-logo-dark login-panel-logo"
+            src="/static/signalaiops-logo-dark-v3.png" alt="SignalAIOps" />
+          <img class="brand-logo brand-logo-light login-panel-logo"
+            src="/static/signalaiops-logo-light-v3.png" alt="SignalAIOps" />
+          <p class="login-panel-tagline">From signal to <em>safe resolution.</em></p>
+          <p class="login-panel-sub">Explainable AI operations, governed from signal to
+            resolution—while people stay in control of every consequential action.</p>
         </div>
+
+        <ol class="login-flow" aria-label="How SignalAIOps handles an incident">
+          <li class="login-flow-step step-detect">
+            <span class="login-flow-symbol pulse-symbol" aria-hidden="true"><i></i></span>
+            <div class="login-flow-copy">
+              <strong>Detect</strong>
+              <small>Correlate the right signal across your stack.</small>
+            </div>
+          </li>
+          <li class="login-flow-step step-diagnose">
+            <span class="login-flow-symbol" aria-hidden="true">AI</span>
+            <div class="login-flow-copy">
+              <strong>Diagnose</strong>
+              <small>Specialist agents explain the root cause.</small>
+            </div>
+          </li>
+          <li class="login-flow-step step-approve">
+            <span class="login-flow-symbol" aria-hidden="true">✓</span>
+            <div class="login-flow-copy">
+              <strong>Approve</strong>
+              <small>A person reviews evidence, impact, and the fix.</small>
+            </div>
+          </li>
+          <li class="login-flow-step step-resolve">
+            <span class="login-flow-symbol" aria-hidden="true">↗</span>
+            <div class="login-flow-copy">
+              <strong>Resolve</strong>
+              <small>Apply safely and verify service recovery.</small>
+            </div>
+          </li>
+        </ol>
+
+        <ul class="login-panel-trust" aria-label="Platform principles">
+          <li><span aria-hidden="true">✓</span> Dry-run first</li>
+          <li><span aria-hidden="true">✓</span> Human approval gates</li>
+          <li><span aria-hidden="true">✓</span> Complete audit trail</li>
+        </ul>
       </section>
 
       <div class="login-form-column">
